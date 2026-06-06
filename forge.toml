@@ -1,0 +1,92 @@
+[app]
+name    = "tivi"
+version = "0.1.0"
+id      = "io.tivi.tivi"
+
+[meta]
+publisher = "Şamil Bülbül (Fezcode)"
+comments  = "Native, resizable video player"
+
+[ui]
+theme        = "console"
+window_title = "tivi Setup"
+
+[install]
+default_dir = "${PROGRAMFILES}/tivi"
+
+# Settings live in %APPDATA%\tivi (outside the install dir), so uninstall
+# never touches them — nothing to keep here.
+[uninstall]
+keep = []
+
+[[steps]]
+type  = "welcome"
+title = "tivi 0.1.0"
+body  = "This wizard will install tivi 0.1.0 on your computer.\n\ntivi is a small, native, resizable video player (FFmpeg-powered, Timp-styled).\n\nClick Next to continue."
+
+[[steps]]
+type  = "license"
+title = "License"
+body  = "tivi is released into the public domain. It bundles FFmpeg, libass and raylib; their licenses apply to those components."
+file  = "LICENSE.txt"
+
+[[steps]]
+type  = "folder"
+title = "Select Folder"
+body  = "Choose where to install tivi 0.1.0."
+
+[[steps]]
+type  = "shortcuts"
+title = "Select Optional Tasks"
+body  = "Check the items you would like the installer to perform."
+
+[[steps]]
+type  = "install"
+title = "Installing..."
+body  = "Copying files to your system."
+
+[[steps]]
+type  = "finish"
+title = "Installation Complete"
+body  = "tivi has been installed successfully.\n\nClick Finish to close the installer."
+
+[[steps.launches]]
+kind    = "app"
+target  = "${INSTALLDIR}/tivi.exe"
+label   = "Run tivi after install"
+checked = true
+
+# Application payload — staged by installer.ps1 (tivi.exe + bundled runtime DLLs).
+[[dirs]]
+src = "dist/win-x64"
+dst = "${INSTALLDIR}"
+
+[[shortcuts]]
+target   = "${INSTALLDIR}/tivi.exe"
+location = "${DESKTOP}/tivi.lnk"
+name     = "tivi"
+icon     = "${INSTALLDIR}/tivi.exe"
+label    = "Create Desktop Shortcut"
+optional = true
+default  = true
+
+[[shortcuts]]
+target   = "${INSTALLDIR}/tivi.exe"
+location = "${STARTMENU}/tivi/tivi.lnk"
+name     = "tivi"
+icon     = "${INSTALLDIR}/tivi.exe"
+label    = "Create Start Menu Entry"
+optional = true
+default  = true
+
+[[registry]]
+hive  = "HKLM"
+key   = "Software\\tivi\\tivi"
+value = "InstallDir"
+data  = "${INSTALLDIR}"
+
+[[registry]]
+hive  = "HKLM"
+key   = "Software\\tivi\\tivi"
+value = "Version"
+data  = "0.1.0"

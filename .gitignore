@@ -1,0 +1,16 @@
+build/
+dist/
+*.o
+*.exe
+*.log
+*.stackdump
+
+# local verification artifacts
+tivi_shot*.png
+tivi_probe.txt
+test_clip*.mp4
+test_clip*.mkv
+test_wide*
+test_audio*
+test.srt
+.superpowers/
