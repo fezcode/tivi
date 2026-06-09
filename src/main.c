@@ -658,14 +658,30 @@ int main(int argc, char **argv) {
             }
         }
 
-        // seek bar live drag
+        // seek bar live drag. Re-seek only when the target actually moves — a
+        // per-frame re-seek at one spot replays the same instant in a loop. While
+        // the drag is moving, scrub silently (paused) and resume on release.
         static bool seek_drag = false, vol_drag = false;
-        if (IsMouseButtonPressed(MOUSE_BUTTON_LEFT) && ctl && open && CheckCollisionPointRec(mp, (Rectangle){ seekR.x - 4, seekR.y - 10, seekR.width + 8, 24 })) seek_drag = true;
+        static bool seek_resume = false;        // was playing when the drag began
+        static double seek_last = -1;
+        if (IsMouseButtonPressed(MOUSE_BUTTON_LEFT) && ctl && open && CheckCollisionPointRec(mp, (Rectangle){ seekR.x - 4, seekR.y - 10, seekR.width + 8, 24 })) {
+            seek_drag = true; seek_resume = player_is_playing(P);
+            double dur = player_duration(P);
+            seek_last = (dur > 0) ? clampf((mp.x - seekR.x) / seekR.width, 0, 1) * dur : -1;
+        }
         if (IsMouseButtonPressed(MOUSE_BUTTON_LEFT) && ctl && CheckCollisionPointRec(mp, (Rectangle){ volR.x - 4, volR.y - 10, volR.width + 8, 24 })) vol_drag = true;
         if (seek_drag) {
-            double dur = player_duration(P);
-            if (IsMouseButtonDown(MOUSE_BUTTON_LEFT)) { if (dur > 0) player_seek(P, clampf((mp.x - seekR.x) / seekR.width, 0, 1) * dur); }
-            else seek_drag = false;
+            if (IsMouseButtonDown(MOUSE_BUTTON_LEFT)) {
+                double dur = player_duration(P);
+                double t = (dur > 0) ? clampf((mp.x - seekR.x) / seekR.width, 0, 1) * dur : -1;
+                if (t >= 0 && t != seek_last) {
+                    if (player_is_playing(P)) player_pause(P);
+                    player_seek(P, t); seek_last = t;
+                }
+            } else {
+                seek_drag = false;
+                if (seek_resume && !player_is_playing(P)) player_play(P);
+            }
         }
         if (vol_drag) { if (IsMouseButtonDown(MOUSE_BUTTON_LEFT)) g_volume = clampf((mp.x - volR.x) / volR.width, 0, 1), g_muted = false, player_set_volume(P, g_volume); else vol_drag = false; }
 
@@ -737,11 +753,18 @@ int main(int argc, char **argv) {
                     int hs; const uint8_t *hd = player_sub_header(P, &hs);
                     subs_set_size(SUB, player_video_width(P), player_video_height(P));
                     subs_begin_embedded(SUB, hd, hs);
+                    // demux the whole track in the background — once it swaps in,
+                    // seeking can never land on a missing line
+                    subs_preload_start(SUB, player_path(P), player_current_sub(P));
                 } else subs_clear(SUB);
             }
             if (!player_sub_is_bitmap(P)) {
+                subs_preload_update(SUB);
                 long long s, d; char *a;
-                while (player_pop_sub_text(P, &s, &d, &a)) { subs_feed(SUB, a, s, d); free(a); }
+                while (player_pop_sub_text(P, &s, &d, &a)) {
+                    if (!subs_is_preloaded(SUB)) subs_feed(SUB, a, s, d);  // live feed until preload lands
+                    free(a);
+                }
             }
         }
 

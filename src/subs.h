@@ -27,6 +27,15 @@ void  subs_feed(Subs *s, const char *ass_line, long long start_ms, long long dur
 // Load an external subtitle file (.ass/.ssa direct; .srt/.vtt/.sub via FFmpeg).
 bool  subs_load_file(Subs *s, const char *path);
 
+// Background full-track preload of one embedded text-subtitle stream. Live-fed
+// events (subs_feed) only cover what the demuxer happens to read, so a seek can
+// land inside a line whose packet was never read — the preload demuxes the whole
+// stream on a worker thread and swaps in a complete track, making rendering
+// purely time-based. Keep feeding live events until subs_is_preloaded() flips.
+void  subs_preload_start(Subs *s, const char *path, int stream_index);
+void  subs_preload_update(Subs *s);        // call once per frame; swaps when ready
+bool  subs_is_preloaded(const Subs *s);
+
 // Render the overlay for now_ms. Returns true with *rgba/*w/*h when something is
 // visible; false when nothing is shown. *changed is set when the image differs
 // from the previous render (so the UI can skip re-uploading the texture).
