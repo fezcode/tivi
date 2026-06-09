@@ -92,6 +92,8 @@ struct Player {
     // resample scratch
     uint8_t *swr_buf; int swr_buf_frames;
     double   audio_pts_running;
+    double   swr_speed;          // playback speed the resampler was built for
+    int      swr_eff_rate;       // declared input rate (real rate × speed)
 
     // clock / state
     double v_clock;
@@ -214,6 +216,9 @@ static void push_audio(Player *p, const float *buf, int frames) {
         bool abort = p->stop || p->seek_req || p->req_audio != NO_REQ || p->req_sub != NO_REQ;
         M_unlock(&p->lock);
         if (abort) return;
+        // keep at most ~0.5 s buffered so speed changes apply promptly (the ring
+        // itself holds 2.7 s — a full ring would lag the new tempo by that much)
+        if (audio_out_fill() > AO_RATE / 2) { msleep(4); continue; }
         int wr = audio_out_push(buf + off * 2, frames - off);
         off += wr;
         if (wr == 0) msleep(4);     // ring full — let the device drain
@@ -223,8 +228,8 @@ static void push_audio(Player *p, const float *buf, int frames) {
 static void decode_audio(Player *p, AVPacket *pkt, AVFrame *frame) {
     if (avcodec_send_packet(p->adec, pkt) < 0) return;
     while (avcodec_receive_frame(p->adec, frame) == 0) {
-        int out_count = (int)av_rescale_rnd(swr_get_delay(p->swr, p->adec->sample_rate) + frame->nb_samples,
-                                            AO_RATE, p->adec->sample_rate, AV_ROUND_UP);
+        int out_count = (int)av_rescale_rnd(swr_get_delay(p->swr, p->swr_eff_rate) + frame->nb_samples,
+                                            AO_RATE, p->swr_eff_rate, AV_ROUND_UP);
         if (out_count > p->swr_buf_frames) {
             free(p->swr_buf);
             p->swr_buf = (uint8_t *)malloc((size_t)out_count * AO_CHANNELS * sizeof(float));
@@ -236,7 +241,8 @@ static void decode_audio(Player *p, AVPacket *pkt, AVFrame *frame) {
         if (got > 0) {
             double sec = (frame->pts != AV_NOPTS_VALUE) ? frame->pts * av_q2d(p->a_tb) : p->audio_pts_running;
             push_audio(p, (const float *)p->swr_buf, got);
-            p->audio_pts_running = sec + (double)got / (double)AO_RATE;
+            // each output second covers swr_speed media seconds
+            p->audio_pts_running = sec + (double)got / (double)AO_RATE * p->swr_speed;
             audio_out_set_end_pts(p->audio_pts_running);
         }
         av_frame_unref(frame);
@@ -316,6 +322,30 @@ static void do_seek(Player *p, double target) {
     M_unlock(&p->lock);
 }
 
+// (Re)build the resampler for the given decoder + playback speed. Speed is done
+// by declaring the input rate as real_rate × speed: the resampler then emits
+// proportionally fewer/more output samples, so audio plays faster/slower (with
+// the matching pitch shift). The audio clock converts buffered output frames
+// back to media time via audio_out_set_speed().
+static bool init_swr(Player *p, AVCodecContext *ctx, double speed) {
+    if (p->swr) swr_free(&p->swr);
+    if (speed < 0.25) speed = 0.25;
+    if (speed > 4.0)  speed = 4.0;
+    AVChannelLayout out_ch; av_channel_layout_default(&out_ch, AO_CHANNELS);
+    AVChannelLayout in_ch  = ctx->ch_layout;
+    if (in_ch.nb_channels <= 0) av_channel_layout_default(&in_ch, 2);
+    int eff = (int)(ctx->sample_rate * speed + 0.5);
+    if (eff < 4000) eff = 4000;
+    if (swr_alloc_set_opts2(&p->swr, &out_ch, AV_SAMPLE_FMT_FLT, AO_RATE,
+                            &in_ch, ctx->sample_fmt, eff, 0, NULL) < 0 || swr_init(p->swr) < 0) {
+        if (p->swr) swr_free(&p->swr);
+        return false;
+    }
+    p->swr_speed = speed; p->swr_eff_rate = eff;
+    audio_out_set_speed(speed);
+    return true;
+}
+
 static void switch_audio(Player *p, int idx) {
     if (p->adec) avcodec_free_context(&p->adec);
     if (p->swr)  swr_free(&p->swr);
@@ -323,13 +353,7 @@ static void switch_audio(Player *p, int idx) {
     if (idx < 0) return;
     AVCodecContext *ctx = open_stream_decoder(p, idx);
     if (!ctx) return;
-    AVChannelLayout out_ch; av_channel_layout_default(&out_ch, AO_CHANNELS);
-    AVChannelLayout in_ch  = ctx->ch_layout;
-    if (in_ch.nb_channels <= 0) av_channel_layout_default(&in_ch, 2);
-    if (swr_alloc_set_opts2(&p->swr, &out_ch, AV_SAMPLE_FMT_FLT, AO_RATE,
-                            &in_ch, ctx->sample_fmt, ctx->sample_rate, 0, NULL) < 0 || swr_init(p->swr) < 0) {
-        avcodec_free_context(&ctx); if (p->swr) swr_free(&p->swr); return;
-    }
+    if (!init_swr(p, ctx, p->speed)) { avcodec_free_context(&ctx); return; }
     p->adec = ctx; p->a_stream = idx; p->a_tb = p->fmt->streams[idx]->time_base; p->has_audio = true;
 }
 
@@ -370,6 +394,10 @@ static void decode_loop(Player *p) {
         if (rs != NO_REQ) { switch_sub(p, rs);   resync = true; }
         if (seek)   { do_seek(p, tgt); continue; }
         if (resync) { do_seek(p, cur); continue; }
+
+        // playback speed changed → rebuild the resampler with the new ratio
+        double spd = p->speed;
+        if (p->adec && p->swr && spd != p->swr_speed) init_swr(p, p->adec, spd);
 
         int r = av_read_frame(p->fmt, pkt);
         if (r < 0) {
@@ -597,7 +625,11 @@ void player_seek(Player *p, double seconds) {
 void player_seek_relative(Player *p, double delta) { player_seek(p, player_position(p) + delta); }
 
 void player_set_volume(Player *p, float v) { p->volume = v; audio_out_set_volume(v); }
-void player_set_speed(Player *p, double s)  { if (s < 0.25) s = 0.25; if (s > 4) s = 4; p->speed = s; }
+void player_set_speed(Player *p, double s)  {
+    if (s < 0.25) s = 0.25;
+    if (s > 4)    s = 4;
+    M_lock(&p->lock); p->speed = s; C_wakeall(&p->cond); M_unlock(&p->lock);
+}
 double player_speed(const Player *p) { return p->speed; }
 
 bool player_has_video(const Player *p) { return p->has_video; }

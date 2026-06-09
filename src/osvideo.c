@@ -130,6 +130,75 @@ void os_console_attach(void) {
     }
 }
 
+// ---- aero snap for the borderless window ----
+// Recipe: keep the window visually borderless but give it the standard frame
+// styles (WS_THICKFRAME etc.) and eat the frame in WM_NCCALCSIZE, so Windows
+// treats it as a normal window: drag-to-edge snap, Win+Arrow, snap layouts,
+// native resize/move loops and the minimize/maximize animations all work.
+static WNDPROC g_snap_prev;
+static int g_snap_on = 1;
+static int g_cap_left, g_cap_right, g_cap_h, g_border;
+
+static LRESULT CALLBACK snap_wndproc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
+    switch (msg) {
+    case WM_NCCALCSIZE:
+        if (wp) {
+            // client area = whole window. When natively maximized, Windows hangs
+            // the (hidden) resize frame off-screen — inset by it so content fits.
+            if (IsZoomed(h)) {
+                NCCALCSIZE_PARAMS *pr = (NCCALCSIZE_PARAMS *)lp;
+                int pad = GetSystemMetrics(SM_CXSIZEFRAME) + GetSystemMetrics(SM_CXPADDEDBORDER);
+                pr->rgrc[0].left += pad; pr->rgrc[0].top += pad;
+                pr->rgrc[0].right -= pad; pr->rgrc[0].bottom -= pad;
+            }
+            return 0;
+        }
+        break;
+    case WM_NCHITTEST: {
+        if (!g_snap_on) break;
+        POINT pt = { (short)LOWORD(lp), (short)HIWORD(lp) };
+        ScreenToClient(h, &pt);
+        RECT rc; GetClientRect(h, &rc);
+        if (!IsZoomed(h)) {
+            int e = 0;
+            if (pt.y < g_border)             e |= 1;
+            if (pt.y >= rc.bottom - g_border) e |= 2;
+            if (pt.x < g_border)             e |= 4;
+            if (pt.x >= rc.right - g_border)  e |= 8;
+            switch (e) {
+                case 1 | 4: return HTTOPLEFT;    case 1 | 8: return HTTOPRIGHT;
+                case 2 | 4: return HTBOTTOMLEFT; case 2 | 8: return HTBOTTOMRIGHT;
+                case 1: return HTTOP;  case 2: return HTBOTTOM;
+                case 4: return HTLEFT; case 8: return HTRIGHT;
+            }
+        }
+        if (pt.y < g_cap_h && pt.x > g_cap_left && pt.x < rc.right - g_cap_right)
+            return HTCAPTION;
+        return HTCLIENT;
+    }
+    }
+    return CallWindowProcW(g_snap_prev, h, msg, wp, lp);
+}
+
+void os_enable_snap(void *hwnd, int cap_left, int cap_right, int cap_h, int border) {
+    HWND h = (HWND)hwnd;
+    g_cap_left = cap_left; g_cap_right = cap_right; g_cap_h = cap_h; g_border = border;
+    LONG_PTR st = GetWindowLongPtrW(h, GWL_STYLE);
+    st |= WS_THICKFRAME | WS_CAPTION | WS_SYSMENU | WS_MAXIMIZEBOX | WS_MINIMIZEBOX;
+    SetWindowLongPtrW(h, GWL_STYLE, st);
+    g_snap_prev = (WNDPROC)SetWindowLongPtrW(h, GWLP_WNDPROC, (LONG_PTR)snap_wndproc);
+    SetWindowPos(h, NULL, 0, 0, 0, 0,
+                 SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED);
+}
+
+bool os_snap_active(void) { return g_snap_prev != NULL; }
+void os_snap_set_enabled(bool on) { g_snap_on = on ? 1 : 0; }
+bool os_is_zoomed(void *hwnd) { return hwnd && IsZoomed((HWND)hwnd); }
+void os_native_maximize_toggle(void *hwnd) {
+    HWND h = (HWND)hwnd;
+    ShowWindow(h, IsZoomed(h) ? SW_RESTORE : SW_MAXIMIZE);
+}
+
 #else
 int  os_open_media_files(void (*on_file)(const char *, void *), void *ud) { (void)on_file; (void)ud; return 0; }
 bool os_open_subtitle_file(char *out, int cap) { (void)out; (void)cap; return false; }
@@ -139,4 +208,9 @@ char **os_args_utf8(int argc, char **argv, int *out_count) { *out_count = argc; 
 void os_focus_window(void *hwnd) { (void)hwnd; }
 bool os_work_area(void *hwnd, int *x, int *y, int *w, int *h) { (void)hwnd;(void)x;(void)y;(void)w;(void)h; return false; }
 void os_console_attach(void) {}
+void os_enable_snap(void *hwnd, int cap_left, int cap_right, int cap_h, int border) { (void)hwnd;(void)cap_left;(void)cap_right;(void)cap_h;(void)border; }
+bool os_snap_active(void) { return false; }
+void os_snap_set_enabled(bool on) { (void)on; }
+bool os_is_zoomed(void *hwnd) { (void)hwnd; return false; }
+void os_native_maximize_toggle(void *hwnd) { (void)hwnd; }
 #endif

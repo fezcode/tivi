@@ -26,6 +26,7 @@ static struct {
     volatile double end_pts;     // pts (s) at the end of all data written
     atomic_bool have_pts;
     volatile float volume;
+    volatile double speed;       // media-seconds per output-second (1 = normal)
 } A;
 
 static unsigned ao_fill_frames(void) {
@@ -54,6 +55,7 @@ bool audio_out_init(void) {
     if (A.inited) return true;
     memset(&A, 0, sizeof(A));
     A.volume = 1.0f;
+    A.speed = 1.0;
     atomic_init(&A.wr, 0); atomic_init(&A.rd, 0); atomic_init(&A.have_pts, false);
     A.ring = (float *)malloc(sizeof(float) * CAP_FRAMES * 2);
     if (!A.ring) return false;
@@ -112,7 +114,12 @@ void audio_out_clear(void) {
 
 double audio_out_clock(void) {
     if (!atomic_load(&A.have_pts)) return -1.0;
-    return A.end_pts - (double)ao_fill_frames() / (double)AO_RATE;
+    double sp = A.speed; if (sp <= 0) sp = 1.0;
+    return A.end_pts - (double)ao_fill_frames() / (double)AO_RATE * sp;
+}
+
+void audio_out_set_speed(double speed) {
+    A.speed = (speed > 0) ? speed : 1.0;
 }
 
 void audio_out_set_volume(float v) {

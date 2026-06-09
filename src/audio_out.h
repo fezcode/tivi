@@ -25,6 +25,9 @@ void   audio_out_clear(void);                    // flush (on seek / stop)
 
 // Clock + transport:
 double audio_out_clock(void);                    // current playback time (s), or -1 if unknown
+// Media-seconds per output-second of the buffered data (playback speed). The
+// clock needs it to convert buffered frames back to media time.
+void   audio_out_set_speed(double speed);
 void   audio_out_set_volume(float v);            // 0..1
 void   audio_out_set_paused(bool paused);
 bool   audio_out_ready(void);

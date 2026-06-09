@@ -31,6 +31,18 @@ void os_focus_window(void *hwnd);
 // off Windows. Used to implement "maximize" for the borderless window.
 bool os_work_area(void *hwnd, int *x, int *y, int *w, int *h);
 
+// Aero snap for the borderless window: adds the hidden standard frame styles and
+// subclasses the window so the top bar hit-tests as a native caption and the 6px
+// edges as native resize borders. Gives drag-to-edge snap, Win+Arrow snapping,
+// snap layouts, and native resize — while staying visually borderless.
+// cap_left/cap_right = pixels reserved for top-bar buttons (not draggable),
+// cap_h = top-bar height, border = resize border thickness.
+void os_enable_snap(void *hwnd, int cap_left, int cap_right, int cap_h, int border);
+bool os_snap_active(void);              // true once os_enable_snap() succeeded
+void os_snap_set_enabled(bool on);      // suspend hit-testing (fullscreen)
+bool os_is_zoomed(void *hwnd);          // natively maximized (snap / Win+Up)?
+void os_native_maximize_toggle(void *hwnd);
+
 // Attach a GUI-subsystem (-mwindows) process to the parent console so that
 // printf from CLI modes (-h / -v / --probe) is visible in the terminal.
 void os_console_attach(void);

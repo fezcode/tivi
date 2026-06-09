@@ -9,6 +9,8 @@ typedef struct {
     bool  always_on_top;
     bool  subtitles_enabled;
     bool  letterbox_black;   // pure-black letterbox bars instead of the warm tint
+    bool  click_pause;       // single click on the video toggles play/pause
+    int   theme;             // UI palette index (see THEMES in main.c)
 
     // Video adjustments (VLC "Video Effects" essentials).
     float brightness;        // -1..1   (0 = neutral)

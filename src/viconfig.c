@@ -29,6 +29,8 @@ void viconfig_defaults(ViConfig *c) {
     c->always_on_top = false;
     c->subtitles_enabled = true;
     c->letterbox_black = true;   // black bars look right for video by default
+    c->click_pause = true;
+    c->theme = 0;
     c->brightness = 0.0f;
     c->contrast   = 1.0f;
     c->saturation = 1.0f;
@@ -57,6 +59,8 @@ bool viconfig_load(ViConfig *c) {
             if      (!strcmp(key, "always_on_top"))     c->always_on_top = iv != 0;
             else if (!strcmp(key, "subtitles_enabled")) c->subtitles_enabled = iv != 0;
             else if (!strcmp(key, "letterbox_black"))   c->letterbox_black = iv != 0;
+            else if (!strcmp(key, "click_pause"))       c->click_pause = iv != 0;
+            else if (!strcmp(key, "theme"))             c->theme = iv;
             else if (!strcmp(key, "win_x")) { c->win_x = iv; c->has_win = true; }
             else if (!strcmp(key, "win_y"))  c->win_y = iv;
             else if (!strcmp(key, "win_w"))  c->win_w = iv;
@@ -76,6 +80,8 @@ bool viconfig_save(const ViConfig *c) {
     fprintf(f, "always_on_top=%d\n", c->always_on_top ? 1 : 0);
     fprintf(f, "subtitles_enabled=%d\n", c->subtitles_enabled ? 1 : 0);
     fprintf(f, "letterbox_black=%d\n", c->letterbox_black ? 1 : 0);
+    fprintf(f, "click_pause=%d\n", c->click_pause ? 1 : 0);
+    fprintf(f, "theme=%d\n", c->theme);
     fprintf(f, "brightness=%.3f\n", c->brightness);
     fprintf(f, "contrast=%.3f\n",   c->contrast);
     fprintf(f, "saturation=%.3f\n", c->saturation);

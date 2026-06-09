@@ -26,13 +26,41 @@
                              // SS× and downscaled with bilinear, for smooth AA on
                              // every shape, icon, and glyph (as in Timp).
 
-// ---------- palette (Timp warm dark + gold) ----------
-static const Color BG0    = {  18,  16,  13, 255 };
-static const Color BG1    = {   8,   7,   5, 255 };
-static const Color TXT    = { 236, 227, 207, 255 };
-static const Color MUT    = { 150, 139, 114, 255 };
-static const Color TRK    = {  60,  54,  42, 255 };
-static const Color ACCENT = { 201, 164,  90, 255 };
+// ---------- palette (Timp-style color themes, selectable in Settings) ----------
+static Color BG0, BG1, TXT, MUT, TRK, ACCENT;
+
+typedef struct { const char *name; Color bg0, bg1, txt, mut, trk, accent; } Theme;
+static const Theme THEMES[] = {
+    { "Gold",   { 18,16,13,255 }, { 8,7,5,255 }, { 236,227,207,255 }, { 150,139,114,255 }, { 60,54,42,255 }, { 201,164, 90,255 } },
+    { "Ocean",  { 13,16,20,255 }, { 5,7,9,255 }, { 211,224,236,255 }, { 117,136,152,255 }, { 42,52,62,255 }, {  96,160,210,255 } },
+    { "Forest", { 13,18,14,255 }, { 5,8,6,255 }, { 215,232,216,255 }, { 122,146,124,255 }, { 44,58,46,255 }, { 110,185,125,255 } },
+    { "Rose",   { 20,14,15,255 }, { 9,5,6,255 }, { 238,215,218,255 }, { 156,122,127,255 }, { 64,44,47,255 }, { 214,110,120,255 } },
+    { "Slate",  { 16,16,18,255 }, { 6,6,8,255 }, { 224,224,228,255 }, { 134,134,142,255 }, { 52,52,58,255 }, { 168,170,182,255 } },
+};
+#define NTHEMES ((int)(sizeof(THEMES) / sizeof(THEMES[0])))
+static int g_theme = 0;
+static bool g_icon_dirty = false;   // re-tint the app icon at the top of the next
+                                    // frame — NEVER inside the render (set_app_icon
+                                    // uses a texture mode, which cannot nest)
+
+static void apply_theme(int idx) {
+    if (idx < 0 || idx >= NTHEMES) idx = 0;
+    g_theme = idx;
+    const Theme *t = &THEMES[idx];
+    BG0 = t->bg0; BG1 = t->bg1; TXT = t->txt; MUT = t->mut; TRK = t->trk; ACCENT = t->accent;
+    g_icon_dirty = true;
+}
+
+// app/taskbar icon — accent rounded square + play mark (re-tinted on theme change)
+static void set_app_icon(void) {
+    RenderTexture2D it = LoadRenderTexture(64, 64);
+    BeginTextureMode(it); ClearBackground(BLANK);
+    DrawRectangleRounded((Rectangle){ 4, 4, 56, 56 }, 0.3f, 16, ACCENT);
+    DrawTriangle((Vector2){ 25, 18 }, (Vector2){ 25, 46 }, (Vector2){ 47, 32 }, BG1);
+    EndTextureMode();
+    Image ico = LoadImageFromTexture(it.texture); ImageFlipVertical(&ico);
+    SetWindowIcon(ico); UnloadImage(ico); UnloadRenderTexture(it);
+}
 
 // ---------- fonts ----------
 static Font fBig, fUI, fSmall;
@@ -192,12 +220,15 @@ static unsigned g_sub_gen_seen = 0;
 static bool     g_subs_on = true;
 static char     g_ext_sub_name[256] = "";   // filename of the loaded external subtitle
 
+static bool g_click_pause = true;   // single click on the video toggles play/pause
+
 // panels
 enum { PANEL_NONE = 0, PANEL_PLAYLIST, PANEL_AUDIO, PANEL_SUBS, PANEL_ADJUST, PANEL_SETTINGS };
 static int g_panel = PANEL_NONE;
 
 // playlist panel interaction (reorder / remove / scroll)
 static int    g_pl_scroll = 0;
+static float  g_set_scroll = 0;     // settings panel scroll (px)
 static int    g_q_press = -1, g_q_drag = -1, g_q_target = -1;
 static float  g_q_press_y = 0;
 static double g_q_press_t = 0;
@@ -341,6 +372,7 @@ static void toggle_fullscreen(void) {
         int m = GetCurrentMonitor();
         Vector2 mp = GetMonitorPosition(m);
         os_round_window(hwnd, false);
+        os_snap_set_enabled(false);   // no caption-drag / edge-resize while fullscreen
         SetWindowState(FLAG_WINDOW_TOPMOST);                 // cover the taskbar
         // Cover the monitor but 1px larger on every side, so the client area does
         // NOT exactly match the monitor. That stops Windows from engaging
@@ -354,12 +386,14 @@ static void toggle_fullscreen(void) {
         SetWindowSize(g_fs_w, g_fs_h);
         SetWindowPosition(g_fs_x, g_fs_y);
         os_round_window(hwnd, true);
+        os_snap_set_enabled(true);
         g_fullscreen = false;
     }
 }
 
 static void toggle_maximize(void) {
     void *hwnd = GetWindowHandle();
+    if (os_snap_active()) { os_native_maximize_toggle(hwnd); return; }   // snap-aware
     if (!g_maximized) {
         Vector2 wp = GetWindowPosition();
         g_restore_x = (int)wp.x; g_restore_y = (int)wp.y; g_restore_w = GetScreenWidth(); g_restore_h = GetScreenHeight();
@@ -420,6 +454,8 @@ int main(int argc, char **argv) {
 
     viconfig_load(&CFG);
     g_volume = CFG.volume; g_aot = CFG.always_on_top; g_subs_on = CFG.subtitles_enabled; g_letterbox_black = CFG.letterbox_black;
+    g_click_pause = CFG.click_pause;
+    apply_theme(CFG.theme);
 
     playlist_init(&PL);
     SetConfigFlags(FLAG_WINDOW_RESIZABLE | FLAG_WINDOW_UNDECORATED | FLAG_MSAA_4X_HINT | FLAG_VSYNC_HINT);
@@ -436,19 +472,14 @@ int main(int argc, char **argv) {
     void *hwnd = GetWindowHandle();
     os_round_window(hwnd, true);   // NOTE: do NOT DwmExtendFrameIntoClientArea here —
                                    // it re-introduces the native caption on a borderless window.
+    // Aero snap: the top bar acts as a native caption (drag-to-edge snap, Win+Arrow,
+    // snap layouts) and the 6px edges as native resize borders. The reserved zones
+    // mirror the UI layout: 84px = "+" button area, 154px = pin/min/max/close.
+    os_enable_snap(hwnd, 84, 154, 48, 6);
     if (CFG.has_win) SetWindowPosition(CFG.win_x, CFG.win_y);
     if (g_aot) SetWindowState(FLAG_WINDOW_TOPMOST);
 
-    // app/taskbar icon — gold rounded square + play mark
-    {
-        RenderTexture2D it = LoadRenderTexture(64, 64);
-        BeginTextureMode(it); ClearBackground(BLANK);
-        DrawRectangleRounded((Rectangle){ 4, 4, 56, 56 }, 0.3f, 16, ACCENT);
-        DrawTriangle((Vector2){ 25, 18 }, (Vector2){ 25, 46 }, (Vector2){ 47, 32 }, BG1);
-        EndTextureMode();
-        Image ico = LoadImageFromTexture(it.texture); ImageFlipVertical(&ico);
-        SetWindowIcon(ico); UnloadImage(ico); UnloadRenderTexture(it);
-    }
+    set_app_icon(); g_icon_dirty = false;
 
     // fonts (loaded at 2x for crisp downscaled text) with Latin + Turkish coverage
     static int cps[640]; int cpc = 0;
@@ -486,6 +517,7 @@ int main(int argc, char **argv) {
     g_last_activity = GetTime();
     Vector2 lastMouse = GetMousePosition();
     double last_click_t = -1; int shot_frame = getenv("TIVI_SHOT") ? 120 : -1, frame = 0;
+    if (shot_frame > 0) g_panel = PANEL_SETTINGS;   // dev hook: screenshot the settings UI
 
     // Supersampled render target: the whole UI is drawn at SS× then downscaled with
     // bilinear filtering, giving smooth anti-aliasing on every shape, icon and glyph.
@@ -499,6 +531,8 @@ int main(int argc, char **argv) {
         Vector2 mp = GetMousePosition();
         bool open = player_is_open(P);
         bool playing = open && player_is_playing(P);
+
+        if (g_icon_dirty) { set_app_icon(); g_icon_dirty = false; }   // theme changed last frame
 
         player_update(P, dt);
 
@@ -582,7 +616,9 @@ int main(int argc, char **argv) {
         if (player_has_video(P) && playing && g_ctrl < 0.05f) HideCursor(); else ShowCursor();
 
         // ---- window resize (borderless edges) ----
-        if (!g_maximized && !g_resizing && !g_moving) {
+        // With aero snap active the OS handles edge-resize + caption-drag natively
+        // (the hit-tested regions never deliver clicks here), so skip the fallback.
+        if (!os_snap_active() && !g_maximized && !g_resizing && !g_moving) {
             const float G = 6;
             int edge = 0;
             if (mp.x <= G) edge |= 1;
@@ -619,8 +655,8 @@ int main(int argc, char **argv) {
             } else { g_resizing = false; SetMouseCursor(MOUSE_CURSOR_DEFAULT); }
         }
 
-        // ---- window move (drag empty top bar) ----
-        if (!g_resizing && !g_maximized && IsMouseButtonPressed(MOUSE_BUTTON_LEFT)
+        // ---- window move (drag empty top bar; fallback when no native snap) ----
+        if (!os_snap_active() && !g_resizing && !g_maximized && IsMouseButtonPressed(MOUSE_BUTTON_LEFT)
             && mp.y < TBH && mp.x > openR.x + 60 && mp.x < aotR.x - 8) { g_moving = true; g_move_grab = mp; }
         if (g_moving) {
             if (IsMouseButtonDown(MOUSE_BUTTON_LEFT)) { Vector2 wp = GetWindowPosition(); SetWindowPosition((int)(wp.x + mp.x - g_move_grab.x), (int)(wp.y + mp.y - g_move_grab.y)); }
@@ -697,13 +733,14 @@ int main(int argc, char **argv) {
             && mp.y > TBH && mp.y < H - (ctl ? CBH : 0)
             && !(g_panel != PANEL_NONE && CheckCollisionPointRec(mp, panelR))) {
             if (now - last_click_t < 0.32) { toggle_fullscreen(); last_click_t = -1; }
-            else { last_click_t = now; if (open) player_toggle(P); g_center_flash = now; g_center_play = player_is_playing(P); }
+            else { last_click_t = now; if (open && g_click_pause) { player_toggle(P); g_center_flash = now; g_center_play = player_is_playing(P); } }
         }
 
         // wheel = volume
         float wheel = GetMouseWheelMove();
         if (wheel != 0) {
             if (g_panel == PANEL_PLAYLIST && CheckCollisionPointRec(mp, panelR)) g_pl_scroll -= (int)wheel;
+            else if (g_panel == PANEL_SETTINGS && CheckCollisionPointRec(mp, panelR)) g_set_scroll -= wheel * 36;
             else set_volume(g_volume + wheel * 0.05f);
         }
 
@@ -1060,38 +1097,136 @@ int main(int argc, char **argv) {
                 DrawTextEx(fSmall, "Reset", (Vector2){ resetR.x + 28, resetR.y + 8 }, 18, 0.3f, rh ? ACCENT : MUT);
                 if (rh && IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) { CFG.brightness = 0; CFG.contrast = 1; CFG.saturation = 1; CFG.hue = 0; CFG.gamma = 1; consumed = true; }
             } else if (g_panel == PANEL_SETTINGS) {
-                const char *labels[4] = { "Always on top", "Black letterbox", "Shuffle", "Repeat" };
-                bool st[4] = { g_aot, g_letterbox_black, playlist_shuffle(&PL), g_repeat != 0 };
+                // Scrollable: small windows can't fit all settings + about.
+                float viewTop = py - 6;
+                float viewH = panelR.y + panelR.height - 10 - viewTop;
+                Rectangle viewR = { panelR.x, viewTop, panelR.width, viewH };
+                bool inview = CheckCollisionPointRec(mp, viewR);
+                static float set_content_h = 999;   // measured last frame
+                float maxScroll = set_content_h - viewH; if (maxScroll < 0) maxScroll = 0;
+                if (g_set_scroll > maxScroll) g_set_scroll = maxScroll;
+                if (g_set_scroll < 0) g_set_scroll = 0;
+                BeginScissorMode((int)(panelR.x * SS), (int)(viewTop * SS), (int)(panelR.width * SS), (int)(viewH * SS));
+                float yy = viewTop + 6 - g_set_scroll;
+
+                // toggles
+                const char *labels[4] = { "Always on top", "Black letterbox", "Shuffle", "Click video to pause" };
+                bool st[4] = { g_aot, g_letterbox_black, playlist_shuffle(&PL), g_click_pause };
                 for (int i = 0; i < 4; i++) {
-                    float yy = py + i * 52;
                     Rectangle row = { px - 6, yy - 6, iw + 12, 46 };
-                    bool hov = CheckCollisionPointRec(mp, row);
+                    bool hov = inview && CheckCollisionPointRec(mp, row);
                     if (hov) DrawRectangleRounded(row, 0.3f, 6, alpha(WHITE, 10));
                     DrawTextEx(fSmall, labels[i], (Vector2){ px, yy + 6 }, 20, 0.3f, TXT);
-                    float tx = panelR.x + panelR.width - 76, tyy = yy;
-                    if (i == 3) { const char *rm[3] = { "Off", "One", "All" };
-                        DrawRectangleRounded((Rectangle){ tx, tyy, 54, 28 }, 0.5f, 8, g_repeat ? alpha(ACCENT, 55) : TRK);
-                        Vector2 mw = MeasureTextEx(fSmall, rm[g_repeat], 16, 0.3f);
-                        DrawTextEx(fSmall, rm[g_repeat], (Vector2){ tx + (54 - mw.x) / 2, tyy + 5 }, 16, 0.3f, g_repeat ? ACCENT : MUT);
-                    } else {
-                        DrawRectangleRounded((Rectangle){ tx, tyy, 54, 28 }, 1, 8, st[i] ? ACCENT : TRK);
-                        scircle(st[i] ? tx + 54 - 15 : tx + 15, tyy + 14, 11, st[i] ? BG1 : alpha(TXT, 210));
-                    }
+                    float tx = panelR.x + panelR.width - 76;
+                    DrawRectangleRounded((Rectangle){ tx, yy, 54, 28 }, 1, 8, st[i] ? ACCENT : TRK);
+                    scircle(st[i] ? tx + 39 : tx + 15, yy + 14, 11, st[i] ? BG1 : alpha(TXT, 210));
                     if (hov && IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) {
                         if (i == 0) { g_aot = !g_aot; if (g_aot) SetWindowState(FLAG_WINDOW_TOPMOST); else ClearWindowState(FLAG_WINDOW_TOPMOST); }
                         else if (i == 1) g_letterbox_black = !g_letterbox_black;
                         else if (i == 2) playlist_set_shuffle(&PL, !playlist_shuffle(&PL));
-                        else { g_repeat = (g_repeat + 1) % 3; playlist_set_loop(&PL, g_repeat == 2); }
+                        else g_click_pause = !g_click_pause;
                         consumed = true;
                     }
+                    yy += 50;
                 }
-                float iy = py + 4 * 52 + 12;
-                DrawTextEx(fSmall, "Speed", (Vector2){ px, iy }, 19, 0.3f, TXT);
-                char sp[16]; snprintf(sp, sizeof sp, "%.2fx", player_speed(P));
-                DrawTextEx(fSmall, sp, (Vector2){ px + 92, iy }, 19, 0.3f, ACCENT);
-                DrawTextEx(fSmall, "[  slower     ]  faster     \\  reset", (Vector2){ px, iy + 30 }, 15, 0.2f, MUT);
-                DrawTextEx(fSmall, "tivi v" TIVI_VERSION "  ·  FFmpeg + libass + raylib", (Vector2){ px, panelR.y + panelR.height - 54 }, 15, 0.2f, alpha(MUT, 200));
-                DrawTextEx(fSmall, "Space play · F full · S snapshot · C subs · X audio", (Vector2){ px, panelR.y + panelR.height - 28 }, 14, 0.2f, alpha(MUT, 160));
+
+                // repeat — segmented Off / One / All
+                DrawTextEx(fSmall, "Repeat", (Vector2){ px, yy + 6 }, 20, 0.3f, TXT);
+                {
+                    const char *rm[3] = { "Off", "One", "All" };
+                    float segW = 46, segH = 28;
+                    float tx = panelR.x + panelR.width - 22 - (segW * 3 + 8);
+                    for (int k = 0; k < 3; k++) {
+                        Rectangle seg = { tx + k * (segW + 4), yy, segW, segH };
+                        bool selSeg = (g_repeat == k);
+                        bool hs = inview && CheckCollisionPointRec(mp, seg);
+                        DrawRectangleRounded(seg, 0.5f, 8, selSeg ? alpha(ACCENT, 70) : (hs ? alpha(WHITE, 18) : TRK));
+                        Vector2 mw = MeasureTextEx(fSmall, rm[k], 16, 0.3f);
+                        DrawTextEx(fSmall, rm[k], (Vector2){ seg.x + (segW - mw.x) / 2, seg.y + 5 }, 16, 0.3f, selSeg ? ACCENT : MUT);
+                        if (hs && IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) { g_repeat = k; playlist_set_loop(&PL, g_repeat == 2); consumed = true; }
+                    }
+                    yy += 50;
+                }
+
+                // theme swatches
+                DrawTextEx(fSmall, "Theme", (Vector2){ px, yy + 6 }, 20, 0.3f, TXT);
+                {
+                    float sw = 28, gap = 10;
+                    float tx = panelR.x + panelR.width - 22 - NTHEMES * (sw + gap) + gap;
+                    for (int k = 0; k < NTHEMES; k++) {
+                        Rectangle cell = { tx + k * (sw + gap), yy + 1, sw, sw };
+                        bool hs = inview && CheckCollisionPointRec(mp, cell);
+                        DrawRectangleRounded(cell, 0.5f, 8, THEMES[k].bg0);
+                        DrawCircleV((Vector2){ cell.x + sw / 2, cell.y + sw / 2 }, 8, THEMES[k].accent);
+                        if (k == g_theme)  DrawRectangleRoundedLines(cell, 0.5f, 8, TXT);
+                        else if (hs)       DrawRectangleRoundedLines(cell, 0.5f, 8, alpha(TXT, 110));
+                        else               DrawRectangleRoundedLines(cell, 0.5f, 8, alpha(WHITE, 24));
+                        if (hs && IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) { apply_theme(k); osd("Theme: %s", THEMES[k].name); consumed = true; }
+                    }
+                    yy += 56;
+                }
+
+                DrawLineEx((Vector2){ px, yy }, (Vector2){ px + iw, yy }, 1, alpha(WHITE, 16));
+                yy += 16;
+
+                // playback speed — slider (0.25–2.00x, 0.05 steps, snaps to 1.00) + presets
+                DrawTextEx(fSmall, "Playback speed", (Vector2){ px, yy }, 19, 0.3f, TXT);
+                {
+                    char spv[16]; snprintf(spv, sizeof spv, "%.2fx", player_speed(P));
+                    Vector2 vm = MeasureTextEx(fSmall, spv, 19, 0.3f);
+                    DrawTextEx(fSmall, spv, (Vector2){ panelR.x + panelR.width - 18 - vm.x, yy }, 19, 0.3f, ACCENT);
+                    const float SLO = 0.25f, SHI = 2.0f;
+                    Rectangle str = { px, yy + 30, iw, 6 };
+                    float sfrac = clampf(((float)player_speed(P) - SLO) / (SHI - SLO), 0, 1);
+                    DrawRectangleRounded(str, 1, 6, TRK);
+                    float n1 = str.x + str.width * ((1.0f - SLO) / (SHI - SLO));
+                    DrawRectangleRec((Rectangle){ n1 - 1, str.y - 3, 2, 12 }, alpha(MUT, 120));   // 1.00x notch
+                    DrawRectangleRounded((Rectangle){ str.x, str.y, str.width * sfrac, str.height }, 1, 6, ACCENT);
+                    scircle(str.x + str.width * sfrac, str.y + 3, 8, TXT);
+                    Rectangle hit = { str.x - 4, str.y - 11, str.width + 8, 28 };
+                    if (inview && CheckCollisionPointRec(mp, hit) && IsMouseButtonDown(MOUSE_BUTTON_LEFT)) {
+                        float v = SLO + clampf((mp.x - str.x) / str.width, 0, 1) * (SHI - SLO);
+                        v = roundf(v * 20.0f) / 20.0f;
+                        if (fabsf(v - 1.0f) < 0.03f) v = 1.0f;
+                        player_set_speed(P, v);
+                        consumed = true;
+                    }
+                    yy += 52;
+                    const float pv[6] = { 0.5f, 0.75f, 1.0f, 1.25f, 1.5f, 2.0f };
+                    const char *pn[6] = { "0.5x", "0.75x", "1x", "1.25x", "1.5x", "2x" };
+                    float chW = (iw - 5 * 8) / 6.0f;
+                    for (int k = 0; k < 6; k++) {
+                        Rectangle chip = { px + k * (chW + 8), yy, chW, 30 };
+                        bool selc = fabs(player_speed(P) - pv[k]) < 0.011;
+                        bool hc = inview && CheckCollisionPointRec(mp, chip);
+                        DrawRectangleRounded(chip, 0.4f, 8, selc ? alpha(ACCENT, 70) : (hc ? alpha(WHITE, 18) : TRK));
+                        Vector2 cw = MeasureTextEx(fSmall, pn[k], 16, 0.2f);
+                        DrawTextEx(fSmall, pn[k], (Vector2){ chip.x + (chW - cw.x) / 2, chip.y + 6 }, 16, 0.2f, selc ? ACCENT : MUT);
+                        if (hc && IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) { player_set_speed(P, pv[k]); osd("Speed %.2fx", player_speed(P)); consumed = true; }
+                    }
+                    yy += 48;
+                }
+
+                // about
+                DrawLineEx((Vector2){ px, yy }, (Vector2){ px + iw, yy }, 1, alpha(WHITE, 16));
+                yy += 14;
+                DrawTextEx(fSmall, "ABOUT", (Vector2){ px, yy }, 15, 3.0f, alpha(ACCENT, 200));
+                yy += 26;
+                DrawTextEx(fUI, "tivi", (Vector2){ px, yy }, 24, 1.5f, ACCENT);
+                DrawTextEx(fSmall, "v" TIVI_VERSION, (Vector2){ px + 54, yy + 5 }, 17, 0.3f, TXT);
+                yy += 32;
+                DrawTextEx(fSmall, "A resizable, FFmpeg-powered video player.", (Vector2){ px, yy }, 17, 0.2f, MUT); yy += 24;
+                DrawTextEx(fSmall, "FFmpeg · libass · raylib  —  public domain", (Vector2){ px, yy }, 17, 0.2f, MUT); yy += 30;
+                DrawTextEx(fSmall, "Space play · J/L seek · F fullscreen · S snapshot", (Vector2){ px, yy }, 15, 0.2f, alpha(MUT, 170)); yy += 22;
+                DrawTextEx(fSmall, "C subtitles · X audio · Q playlist · [ ] \\ speed", (Vector2){ px, yy }, 15, 0.2f, alpha(MUT, 170)); yy += 24;
+
+                EndScissorMode();
+                set_content_h = (yy + g_set_scroll) - viewTop;
+                if (set_content_h > viewH) {   // scrollbar
+                    float th = viewH * viewH / set_content_h;
+                    float ty2 = viewTop + (maxScroll > 0 ? (viewH - th) * (g_set_scroll / maxScroll) : 0);
+                    DrawRectangleRounded((Rectangle){ panelR.x + panelR.width - 5, ty2, 3, th }, 1, 4, alpha(ACCENT, 130));
+                }
             }
         }
 
@@ -1134,7 +1269,8 @@ int main(int argc, char **argv) {
 
     // ---- persist + cleanup ----
     CFG.volume = g_volume; CFG.always_on_top = g_aot; CFG.subtitles_enabled = g_subs_on; CFG.letterbox_black = g_letterbox_black;
-    if (!g_maximized) { Vector2 wp = GetWindowPosition(); CFG.win_x = (int)wp.x; CFG.win_y = (int)wp.y; CFG.win_w = GetScreenWidth(); CFG.win_h = GetScreenHeight(); CFG.has_win = true; }
+    CFG.click_pause = g_click_pause; CFG.theme = g_theme;
+    if (!g_maximized && !os_is_zoomed(GetWindowHandle())) { Vector2 wp = GetWindowPosition(); CFG.win_x = (int)wp.x; CFG.win_y = (int)wp.y; CFG.win_w = GetScreenWidth(); CFG.win_h = GetScreenHeight(); CFG.has_win = true; }
     viconfig_save(&CFG);
 
     player_destroy(P);
