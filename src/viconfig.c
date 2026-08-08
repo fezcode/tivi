@@ -8,26 +8,11 @@
 #include <windows.h>
 #endif
 
-// Portable-first config location: config.ini NEXT TO THE EXECUTABLE whenever the
-// exe directory is usable (dev build, bundle, portable copies). Installs under
-// Program Files are not user-writable, so those fall back to %APPDATA%\tivi.
-// Load prefers an existing exe-dir file, then %APPDATA% (migration path: first
-// save next to a writable exe adopts the portable location from then on).
+// Config home: %APPDATA%\tivi\config.ini — one predictable location for every
+// install. (0.2.1 briefly wrote next to the exe; load still merges such a file
+// back once and deletes it, so nothing set under 0.2.1 is lost.)
 
-static void exe_cfg_path(char *out, int cap) {
-    out[0] = 0;
-#ifdef _WIN32
-    char exe[520] = { 0 };
-    DWORD n = GetModuleFileNameA(NULL, exe, sizeof(exe));
-    if (n > 0 && n < sizeof(exe) - 12) {
-        char *sl = NULL;
-        for (char *p = exe; *p; p++) if (*p == '\\' || *p == '/') sl = p;
-        if (sl) { *sl = 0; snprintf(out, cap, "%s\\config.ini", exe); }
-    }
-#endif
-}
-
-static void appdata_cfg_path(char *out, int cap) {
+static void cfg_path(char *out, int cap) {
 #ifdef _WIN32
     const char *appdata = getenv("APPDATA");
     if (appdata && *appdata) {
@@ -42,13 +27,17 @@ static void appdata_cfg_path(char *out, int cap) {
 #endif
 }
 
-static void cfg_path(char *out, int cap) {   // load: exe-dir file wins if it exists
-    exe_cfg_path(out, cap);
-    if (out[0]) {
-        FILE *f = fopen(out, "r");
-        if (f) { fclose(f); return; }
+static void exe_cfg_path(char *out, int cap) {   // 0.2.1 portable leftover location
+    out[0] = 0;
+#ifdef _WIN32
+    char exe[520] = { 0 };
+    DWORD n = GetModuleFileNameA(NULL, exe, sizeof(exe));
+    if (n > 0 && n < sizeof(exe) - 12) {
+        char *sl = NULL;
+        for (char *p = exe; *p; p++) if (*p == '\\' || *p == '/') sl = p;
+        if (sl) { *sl = 0; snprintf(out, cap, "%s\\config.ini", exe); }
     }
-    appdata_cfg_path(out, cap);
+#endif
 }
 
 void viconfig_defaults(ViConfig *c) {
@@ -77,9 +66,7 @@ void viconfig_defaults(ViConfig *c) {
     c->has_win = false;
 }
 
-bool viconfig_load(ViConfig *c) {
-    viconfig_defaults(c);
-    char path[600]; cfg_path(path, sizeof(path));
+static bool parse_file(ViConfig *c, const char *path) {
     FILE *f = fopen(path, "r");
     if (!f) return false;
     char line[256];
@@ -123,10 +110,20 @@ bool viconfig_load(ViConfig *c) {
     return true;
 }
 
+bool viconfig_load(ViConfig *c) {
+    viconfig_defaults(c);
+    char path[600]; cfg_path(path, sizeof(path));
+    bool any = parse_file(c, path);
+    // One-time merge of a 0.2.1 portable config next to the exe: its values win
+    // (they are newer), then the file is removed so %APPDATA% is the only home.
+    char ep[600]; exe_cfg_path(ep, sizeof(ep));
+    if (ep[0] && parse_file(c, ep)) { remove(ep); any = true; }
+    return any;
+}
+
 bool viconfig_save(const ViConfig *c) {
-    char path[600]; exe_cfg_path(path, sizeof(path));
-    FILE *f = path[0] ? fopen(path, "w") : NULL;   // portable first…
-    if (!f) { appdata_cfg_path(path, sizeof(path)); f = fopen(path, "w"); }   // …%APPDATA% fallback
+    char path[600]; cfg_path(path, sizeof(path));
+    FILE *f = fopen(path, "w");
     if (!f) return false;
     fprintf(f, "# tivi settings\n");
     fprintf(f, "volume=%.3f\n", c->volume);

@@ -66,8 +66,7 @@ Grab **`tivi-Setup-<version>.exe`** from the [latest release](https://github.com
 and run it — fully self-contained (FFmpeg, libass and raylib bundled), registers in
 Add/Remove Programs, ships its own uninstaller. Silent install: `Setup.exe /S`.
 
-Settings are **portable** — `config.ini` lives next to `tivi.exe` whenever that folder is
-writable, falling back to `%APPDATA%\tivi` (Program Files installs). They survive uninstall.
+Settings live in `%APPDATA%\tivi` and survive uninstall.
 
 ## 🚀 Usage
 
@@ -116,11 +115,10 @@ pacman -S mingw-w64-x86_64-gcc mingw-w64-x86_64-pkgconf `
 
 ## ⚙️ Configuration
 
-`config.ini` sits **next to `tivi.exe`** when that folder is writable (portable style), else in
-`%APPDATA%\tivi\`. Settings **autosave as you change them** — a crash or kill can't lose them.
-Persisted: volume, always-on-top, theme, subtitle settings (font, size, colors, outline, shadow),
-hardware decode / GPU conversion toggles, auto-queue, pinned controls, the five video
-adjustments, and window geometry. Snapshots (`S`) are saved to the **Desktop**.
+`config.ini` lives in `%APPDATA%\tivi\`. Settings **autosave as you change them** — a crash or
+kill can't lose them. Persisted: volume, always-on-top, theme, subtitle settings (font, size,
+colors, outline, shadow), hardware decode / GPU conversion toggles, auto-queue, pinned controls,
+the five video adjustments, and window geometry. Snapshots (`S`) are saved to the **Desktop**.
 
 ## 💻 Command line
 
