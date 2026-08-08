@@ -32,6 +32,7 @@
   <rect x="48" y="96" width="160" height="118" rx="24" fill="none" stroke="url(#gold)" stroke-width="14"/>
   <rect x="62" y="110" width="132" height="90" rx="13" fill="#c9a45a" fill-opacity="0.10"/>
 
-  <!-- play -->
-  <path d="M112 130 v50 a6.5 6.5 0 0 0 9.8 5.6 l44 -25 a6.5 6.5 0 0 0 0 -11.2 l-44 -25 a6.5 6.5 0 0 0 -9.8 5.6 z" fill="url(#gold)"/>
+  <!-- play (visually centered in the 62..194 screen: bbox center ~131, a light
+       optical right-shift past the 128 midpoint, centroid just left of it) -->
+  <path d="M105 130 v50 a6.5 6.5 0 0 0 9.8 5.6 l44 -25 a6.5 6.5 0 0 0 0 -11.2 l-44 -25 a6.5 6.5 0 0 0 -9.8 5.6 z" fill="url(#gold)"/>
 </svg>
