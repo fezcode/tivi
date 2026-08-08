@@ -49,6 +49,7 @@ void viconfig_defaults(ViConfig *c) {
     c->click_pause = true;
     c->auto_queue = true;
     c->pin_controls = false;
+    c->pitch_correct = true;
     c->theme = 0;
     c->brightness = 0.0f;
     c->contrast   = 1.0f;
@@ -90,6 +91,7 @@ static bool parse_file(ViConfig *c, const char *path) {
             else if (!strcmp(key, "click_pause"))       c->click_pause = iv != 0;
             else if (!strcmp(key, "auto_queue"))        c->auto_queue = iv != 0;
             else if (!strcmp(key, "pin_controls"))      c->pin_controls = iv != 0;
+            else if (!strcmp(key, "pitch_correct"))     c->pitch_correct = iv != 0;
             else if (!strcmp(key, "theme"))             c->theme = iv;
             else if (!strcmp(key, "hw_decode"))         c->hw_decode = iv != 0;
             else if (!strcmp(key, "gpu_convert"))       c->gpu_convert = iv != 0;
@@ -133,6 +135,7 @@ bool viconfig_save(const ViConfig *c) {
     fprintf(f, "click_pause=%d\n", c->click_pause ? 1 : 0);
     fprintf(f, "auto_queue=%d\n", c->auto_queue ? 1 : 0);
     fprintf(f, "pin_controls=%d\n", c->pin_controls ? 1 : 0);
+    fprintf(f, "pitch_correct=%d\n", c->pitch_correct ? 1 : 0);
     fprintf(f, "theme=%d\n", c->theme);
     fprintf(f, "brightness=%.3f\n", c->brightness);
     fprintf(f, "contrast=%.3f\n",   c->contrast);

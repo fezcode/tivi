@@ -59,6 +59,7 @@ void    player_seek_relative(Player *p, double delta);
 
 void    player_set_volume(Player *p, float v);      // 0..1
 void    player_set_speed(Player *p, double speed);  // 0.25..4 (1 = normal)
+void    player_set_pitch_correct(Player *p, bool on);  // speed via time-stretch (keeps pitch) vs resample
 double  player_speed(const Player *p);
 
 // Video. player_frame() fills the current display frame; *changed is set true

@@ -8,10 +8,14 @@
 #include <libavutil/channel_layout.h>
 #include <libswscale/swscale.h>
 #include <libswresample/swresample.h>
+#include <libavfilter/avfilter.h>
+#include <libavfilter/buffersrc.h>
+#include <libavfilter/buffersink.h>
 #include <libavutil/hwcontext.h>
 #include <libavutil/pixdesc.h>
 #include <libavutil/time.h>
 
+#include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -110,6 +114,15 @@ struct Player {
     SubBmp  sbq[SBQ];   int sbqh, sbqn;
     SubBmp  cur_bmp;    bool cur_bmp_valid;       // UI-owned active bitmap sub
     uint8_t *sub_header; int sub_header_size; bool sub_is_bitmap; unsigned sub_gen;
+
+    // pitch-preserving speed: atempo filter graph at the decoder's native format
+    // (time-stretch, VLC-style). Active when pitch_correct is on and speed != 1.
+    AVFilterGraph   *agraph;
+    AVFilterContext *asrc, *asink;
+    AVFrame         *afr;            // filtered-frame scratch
+    double           chain_speed;    // speed the audio chain was built for
+    int              chain_pitch;    // 1 = atempo chain, 0 = resample (pitch shifts)
+    int              pitch_correct;  // desired mode (UI)
 
     // resample scratch
     uint8_t *swr_buf; int swr_buf_frames;
@@ -364,12 +377,22 @@ static void decode_video(Player *p, AVPacket *pkt, AVFrame *frame) {
 
 static void push_audio(Player *p, const float *buf, int frames) {
     int off = 0;
+    int64_t t0 = av_gettime_relative(); int warned = 0;
     while (off < frames) {
         M_lock(&p->lock);
         bool abort = p->stop || p->seek_req || p->req_audio != NO_REQ || p->req_sub != NO_REQ;
         int vq = p->vqn;
         M_unlock(&p->lock);
         if (abort) return;
+        {   // perf probe: a push blocked >2 s means the ring is not draining
+            static int perf = -1; if (perf < 0) perf = getenv("TIVI_PERF") ? 1 : 0;
+            if (perf && av_gettime_relative() - t0 > (warned + 1) * 2000000LL) {
+                warned++;
+                printf("[perf] push_audio stuck %ds: fill %u vq %d frames %d off %d\n",
+                       warned * 2, audio_out_fill(), vq, frames, off);
+                fflush(stdout);
+            }
+        }
         // Keep ~0.5 s of audio buffered so speed changes apply promptly — but never
         // at the cost of starving video: many files (e.g. WEB-DL MKVs) interleave
         // audio packets up to ~0.5 s AHEAD of the matching video packets, so pausing
@@ -385,36 +408,68 @@ static void push_audio(Player *p, const float *buf, int frames) {
     }
 }
 
+// Native-format frame → swr (format/rate, and speed in the classic mode) → ring.
+// Returns output frames pushed.
+static int convert_push(Player *p, AVFrame *frame) {
+    int out_count = (int)av_rescale_rnd(swr_get_delay(p->swr, p->swr_eff_rate) + frame->nb_samples,
+                                        AO_RATE, p->swr_eff_rate, AV_ROUND_UP);
+    if (out_count > p->swr_buf_frames) {
+        free(p->swr_buf);
+        p->swr_buf = (uint8_t *)malloc((size_t)out_count * AO_CHANNELS * sizeof(float));
+        p->swr_buf_frames = p->swr_buf ? out_count : 0;
+        if (!p->swr_buf) return 0;
+    }
+    uint8_t *outp[1] = { p->swr_buf };
+    int got = swr_convert(p->swr, outp, out_count, (const uint8_t **)frame->extended_data, frame->nb_samples);
+    if (got > 0) push_audio(p, (const float *)p->swr_buf, got);
+    return got > 0 ? got : 0;
+}
+
 static void decode_audio(Player *p, AVPacket *pkt, AVFrame *frame) {
     if (avcodec_send_packet(p->adec, pkt) < 0) return;
     while (avcodec_receive_frame(p->adec, frame) == 0) {
+        double sec = (frame->pts != AV_NOPTS_VALUE) ? frame->pts * av_q2d(p->a_tb) : p->audio_pts_running;
+        double dur = (frame->sample_rate > 0) ? (double)frame->nb_samples / frame->sample_rate : 0;
         // Seek preroll: skip audio that ends before the seek target. Pushing it
         // would rewind the master clock to the keyframe and replay old audio.
-        if (frame->pts != AV_NOPTS_VALUE && frame->sample_rate > 0) {
-            double sec = frame->pts * av_q2d(p->a_tb);
-            double dur = (double)frame->nb_samples / frame->sample_rate;
-            if (sec + dur < p->preroll_to) {
+        if (frame->pts != AV_NOPTS_VALUE && frame->sample_rate > 0 && sec + dur < p->preroll_to) {
+            p->audio_pts_running = sec + dur;
+            av_frame_unref(frame);
+            continue;
+        }
+        if (p->agraph) {
+            // Pitch-preserving path: atempo eats the frame at native pitch, then swr
+            // converts. pts tracked on the input side — the filter's small internal
+            // buffer (~tens of ms) is an accepted constant clock offset.
+            static int perf = -1; if (perf < 0) perf = getenv("TIVI_PERF") ? 1 : 0;
+            static int64_t fed = 0, out = 0; static int64_t plast = 0;
+            int rc = av_buffersrc_add_frame_flags(p->asrc, frame, AV_BUFFERSRC_FLAG_KEEP_REF);
+            if (rc >= 0) {
+                fed += frame->nb_samples;
+                if (!p->afr) p->afr = av_frame_alloc();
+                while (p->afr && av_buffersink_get_frame(p->asink, p->afr) >= 0) {
+                    out += p->afr->nb_samples;
+                    // sink is pinned to interleaved flt stereo @ AO_RATE → straight to the ring
+                    if (p->afr->data[0] && p->afr->nb_samples > 0)
+                        push_audio(p, (const float *)p->afr->data[0], p->afr->nb_samples);
+                    av_frame_unref(p->afr);
+                }
                 p->audio_pts_running = sec + dur;
-                av_frame_unref(frame);
-                continue;
+                audio_out_set_end_pts(p->audio_pts_running);
+            } else if (perf) {
+                printf("[perf] atempo: buffersrc add failed (%d)\n", rc); fflush(stdout);
             }
-        }
-        int out_count = (int)av_rescale_rnd(swr_get_delay(p->swr, p->swr_eff_rate) + frame->nb_samples,
-                                            AO_RATE, p->swr_eff_rate, AV_ROUND_UP);
-        if (out_count > p->swr_buf_frames) {
-            free(p->swr_buf);
-            p->swr_buf = (uint8_t *)malloc((size_t)out_count * AO_CHANNELS * sizeof(float));
-            p->swr_buf_frames = p->swr_buf ? out_count : 0;
-            if (!p->swr_buf) { av_frame_unref(frame); return; }
-        }
-        uint8_t *outp[1] = { p->swr_buf };
-        int got = swr_convert(p->swr, outp, out_count, (const uint8_t **)frame->extended_data, frame->nb_samples);
-        if (got > 0) {
-            double sec = (frame->pts != AV_NOPTS_VALUE) ? frame->pts * av_q2d(p->a_tb) : p->audio_pts_running;
-            push_audio(p, (const float *)p->swr_buf, got);
-            // each output second covers swr_speed media seconds
-            p->audio_pts_running = sec + (double)got / (double)AO_RATE * p->swr_speed;
-            audio_out_set_end_pts(p->audio_pts_running);
+            if (perf) {
+                int64_t nowt = av_gettime_relative();
+                if (nowt - plast > 2000000LL) { plast = nowt; printf("[perf] atempo: fed %lld out %lld samples\n", (long long)fed, (long long)out); fflush(stdout); }
+            }
+        } else {
+            int got = convert_push(p, frame);
+            if (got > 0) {
+                // each output second covers swr_speed media seconds
+                p->audio_pts_running = sec + (double)got / (double)AO_RATE * p->swr_speed;
+                audio_out_set_end_pts(p->audio_pts_running);
+            }
         }
         av_frame_unref(frame);
     }
@@ -493,6 +548,7 @@ static void do_seek(Player *p, double target) {
     if (p->vdec) avcodec_flush_buffers(p->vdec);
     if (p->adec) avcodec_flush_buffers(p->adec);
     if (p->sdec) avcodec_flush_buffers(p->sdec);
+    p->chain_speed = -1;   // force an audio-chain rebuild → drops stale atempo/swr state
     audio_out_clear();
     M_lock(&p->lock);
     while (p->vqn > 0) { p->vfree[p->nfree++] = p->vq[p->vqh].buf; p->vqh = (p->vqh + 1) % VPOOL; p->vqn--; }
@@ -503,11 +559,11 @@ static void do_seek(Player *p, double target) {
     M_unlock(&p->lock);
 }
 
-// (Re)build the resampler for the given decoder + playback speed. Speed is done
-// by declaring the input rate as real_rate × speed: the resampler then emits
-// proportionally fewer/more output samples, so audio plays faster/slower (with
-// the matching pitch shift). The audio clock converts buffered output frames
-// back to media time via audio_out_set_speed().
+// (Re)build the resampler for the given decoder + speed ratio. Ratio != 1 does
+// speed by declaring the input rate as real_rate × ratio: the resampler then
+// emits proportionally fewer/more output samples, so audio plays faster/slower
+// WITH the matching pitch shift. In pitch-preserving mode the ratio is 1.0 and
+// atempo (below) does the time-stretch instead.
 static bool init_swr(Player *p, AVCodecContext *ctx, double speed) {
     if (p->swr) swr_free(&p->swr);
     if (speed < 0.25) speed = 0.25;
@@ -523,19 +579,86 @@ static bool init_swr(Player *p, AVCodecContext *ctx, double speed) {
         return false;
     }
     p->swr_speed = speed; p->swr_eff_rate = eff;
-    audio_out_set_speed(speed);
     return true;
+}
+
+static void free_afilter(Player *p) {
+    if (p->agraph) avfilter_graph_free(&p->agraph);
+    p->asrc = p->asink = NULL;
+}
+
+// atempo graph at the decoder's native format/rate — changes duration, not pitch.
+// atempo covers [0.5, 100]; below 0.5 two instances of sqrt(speed) are chained.
+static bool init_afilter(Player *p, AVCodecContext *ctx, double speed) {
+    free_afilter(p);
+    const AVFilter *fsrc = avfilter_get_by_name("abuffer");
+    const AVFilter *fsink = avfilter_get_by_name("abuffersink");
+    if (!fsrc || !fsink || ctx->sample_rate <= 0) return false;
+    p->agraph = avfilter_graph_alloc();
+    if (!p->agraph) return false;
+    AVChannelLayout in_ch = ctx->ch_layout;
+    if (in_ch.nb_channels <= 0) av_channel_layout_default(&in_ch, 2);
+    char chdesc[128];
+    if (av_channel_layout_describe(&in_ch, chdesc, sizeof chdesc) < 0) snprintf(chdesc, sizeof chdesc, "stereo");
+    char args[256];
+    snprintf(args, sizeof args, "time_base=1/%d:sample_rate=%d:sample_fmt=%s:channel_layout=%s",
+             ctx->sample_rate, ctx->sample_rate, av_get_sample_fmt_name(ctx->sample_fmt), chdesc);
+    if (avfilter_graph_create_filter(&p->asrc, fsrc, "in", args, NULL, p->agraph) < 0 ||
+        avfilter_graph_create_filter(&p->asink, fsink, "out", NULL, NULL, p->agraph) < 0) {
+        free_afilter(p); return false;
+    }
+    // The sink MUST be pinned to the ring's format (interleaved flt, stereo,
+    // AO_RATE): the graph is free to negotiate atempo's internal format, so
+    // without the trailing aformat the output format is whatever the negotiator
+    // picked — feeding that to a converter expecting the decoder's layout reads
+    // wild plane pointers (heap corruption). aformat also makes swr unnecessary:
+    // sink frames go straight to the ring.
+    char chain[256];
+    int n = 0;
+    if (speed < 0.5) { double r = sqrt(speed); n = snprintf(chain, sizeof chain, "atempo=%.6f,atempo=%.6f", r, r); }
+    else             n = snprintf(chain, sizeof chain, "atempo=%.6f", speed);
+    snprintf(chain + n, sizeof chain - n, ",aformat=sample_fmts=flt:sample_rates=%d:channel_layouts=stereo", AO_RATE);
+    AVFilterInOut *outs = avfilter_inout_alloc(), *ins = avfilter_inout_alloc();
+    int rc = (outs && ins) ? 0 : -1;
+    if (rc == 0) {
+        outs->name = av_strdup("in");  outs->filter_ctx = p->asrc;  outs->pad_idx = 0; outs->next = NULL;
+        ins->name  = av_strdup("out"); ins->filter_ctx  = p->asink; ins->pad_idx = 0; ins->next  = NULL;
+        rc = avfilter_graph_parse_ptr(p->agraph, chain, &ins, &outs, NULL);
+        if (rc >= 0) rc = avfilter_graph_config(p->agraph, NULL);
+    }
+    avfilter_inout_free(&ins); avfilter_inout_free(&outs);
+    if (rc < 0) { free_afilter(p); return false; }
+    return true;
+}
+
+// Build the full audio chain for the current speed + pitch mode. Either way one
+// output second covers `speed` media seconds, so the clock math is identical:
+// - pitch-correct: atempo stretches time at native pitch, swr only converts
+//   format/rate (ratio 1.0); falls back to the resample path if the graph fails
+// - classic: swr does the speed via the rate lie (pitch shifts with speed)
+static void rebuild_audio_chain(Player *p, AVCodecContext *ctx) {
+    double spd = p->speed;
+    if (spd < 0.25) spd = 0.25;
+    if (spd > 4.0)  spd = 4.0;
+    int pc = (p->pitch_correct && spd != 1.0) ? 1 : 0;
+    if (pc && !init_afilter(p, ctx, spd)) pc = 0;
+    if (!pc) free_afilter(p);
+    init_swr(p, ctx, pc ? 1.0 : spd);
+    audio_out_set_speed(spd);
+    p->chain_speed = spd; p->chain_pitch = pc;
 }
 
 static void switch_audio(Player *p, int idx) {
     if (p->adec) avcodec_free_context(&p->adec);
     if (p->swr)  swr_free(&p->swr);
+    free_afilter(p);
     p->a_stream = -1; p->has_audio = false;
     if (idx < 0) return;
     AVCodecContext *ctx = open_stream_decoder(p, idx);
     if (!ctx) return;
-    if (!init_swr(p, ctx, p->speed)) { avcodec_free_context(&ctx); return; }
+    if (!init_swr(p, ctx, 1.0)) { avcodec_free_context(&ctx); return; }   // probe formats
     p->adec = ctx; p->a_stream = idx; p->a_tb = p->fmt->streams[idx]->time_base; p->has_audio = true;
+    rebuild_audio_chain(p, ctx);
 }
 
 static void switch_sub(Player *p, int idx) {
@@ -576,9 +699,13 @@ static void decode_loop(Player *p) {
         if (seek)   { do_seek(p, tgt); continue; }
         if (resync) { do_seek(p, cur); continue; }
 
-        // playback speed changed → rebuild the resampler with the new ratio
+        // playback speed or pitch mode changed → rebuild the audio chain
         double spd = p->speed;
-        if (p->adec && p->swr && spd != p->swr_speed) init_swr(p, p->adec, spd);
+        if (spd < 0.25) spd = 0.25;
+        if (spd > 4.0)  spd = 4.0;
+        int wantpc = (p->pitch_correct && spd != 1.0) ? 1 : 0;
+        if (p->adec && p->swr && (spd != p->chain_speed || wantpc != p->chain_pitch))
+            rebuild_audio_chain(p, p->adec);
 
         static int perf = -1; if (perf < 0) perf = getenv("TIVI_PERF") ? 1 : 0;
         static double lp_read, lp_aud, lp_vid, lp_sub; static int64_t lp_w0;
@@ -756,6 +883,8 @@ void player_close(Player *p) {
     free(p->snap_rgba); p->snap_rgba = NULL;
     if (p->sws)  { sws_freeContext(p->sws); p->sws = NULL; }
     if (p->swr)  swr_free(&p->swr);
+    free_afilter(p);
+    if (p->afr)  av_frame_free(&p->afr);
     if (p->fmt)  avformat_close_input(&p->fmt);
     free_video_pool(p);
     clear_sub_queues(p);
@@ -791,7 +920,12 @@ bool player_eof(Player *p) {
 void player_update(Player *p, double dt) {
     if (!p->opened) return;
     M_lock(&p->lock);
-    double aclk = p->has_audio ? audio_out_clock() : -1.0;
+    // Audio is the master clock — but only while the ring actually has samples.
+    // When it starves (device underrun, or the atempo chain's bootstrap window
+    // right after a speed change), freewheel at play speed instead of freezing:
+    // a frozen clock stops the pacer, the video queue fills, and the single
+    // decode thread blocks on a video slot before it can refill the audio.
+    double aclk = (p->has_audio && audio_out_fill() > 0) ? audio_out_clock() : -1.0;
     if (aclk >= 0)            p->v_clock = aclk;
     else if (p->playing)      { p->v_clock += dt * p->speed; if (p->v_clock < 0) p->v_clock = 0; }
     double master = p->v_clock;
@@ -858,6 +992,10 @@ void player_set_speed(Player *p, double s)  {
     M_lock(&p->lock); p->speed = s; C_wakeall(&p->cond); M_unlock(&p->lock);
 }
 double player_speed(const Player *p) { return p->speed; }
+
+void player_set_pitch_correct(Player *p, bool on) {
+    M_lock(&p->lock); p->pitch_correct = on ? 1 : 0; C_wakeall(&p->cond); M_unlock(&p->lock);
+}
 
 bool player_has_video(const Player *p) { return p->has_video; }
 int  player_video_width(const Player *p)  { return p->vw; }

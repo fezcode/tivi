@@ -695,6 +695,7 @@ int main(int argc, char **argv) {
     P = player_create();
     player_set_hw_decode(P, CFG.hw_decode);
     player_set_gpu_convert(P, CFG.gpu_convert);
+    player_set_pitch_correct(P, CFG.pitch_correct);
     SUB = subs_create();
     apply_sub_style();
 
@@ -1541,6 +1542,24 @@ int main(int argc, char **argv) {
                     yy += 48;
                 }
 
+                // pitch-preserving speed (atempo time-stretch vs plain resample)
+                {
+                    Rectangle row = { px - 6, yy - 6, iw + 12, 46 };
+                    bool hov = inview && CheckCollisionPointRec(mp, row);
+                    if (hov) DrawRectangleRounded(row, 0.3f, 6, alpha(WHITE, 10));
+                    DrawTextEx(fSmall, "Keep pitch (time-stretch)", (Vector2){ px, yy + 6 }, 20, 0.3f, TXT);
+                    float tx = panelR.x + panelR.width - 76;
+                    DrawRectangleRounded((Rectangle){ tx, yy, 54, 28 }, 1, 8, CFG.pitch_correct ? ACCENT : TRK);
+                    scircle(CFG.pitch_correct ? tx + 39 : tx + 15, yy + 14, 11, CFG.pitch_correct ? BG1 : alpha(TXT, 210));
+                    if (hov && IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) {
+                        CFG.pitch_correct = !CFG.pitch_correct;
+                        player_set_pitch_correct(P, CFG.pitch_correct);
+                        osd(CFG.pitch_correct ? "Speed keeps pitch" : "Speed shifts pitch");
+                        consumed = true;
+                    }
+                    yy += 50;
+                }
+
                 // ---- Performance (GPU acceleration) ----
                 DrawLineEx((Vector2){ px, yy }, (Vector2){ px + iw, yy }, 1, alpha(WHITE, 16)); yy += 14;
                 DrawTextEx(fSmall, "PERFORMANCE", (Vector2){ px, yy }, 15, 3.0f, alpha(ACCENT, 200)); yy += 26;
@@ -1756,6 +1775,9 @@ int main(int argc, char **argv) {
             static int seektest = -1; if (seektest < 0) seektest = getenv("TIVI_SEEKTEST") ? 1 : 0;
             if (seektest && open && (frame == 240 || frame == 480)) player_seek_relative(P, 5);
             if (seektest && open && frame == 720)                   player_seek_relative(P, -5);
+            // dev hook: TIVI_SPEEDTEST=<x> sets playback speed at frame 120 (headless A/V pace check)
+            static double sptest = -2; if (sptest < -1) { const char *e = getenv("TIVI_SPEEDTEST"); sptest = e ? atof(e) : 0; }
+            if (sptest > 0 && open && frame == 120) player_set_speed(P, sptest);
         }
 
         // ---- perf probe (TIVI_PERF=1): UI fps + video update rate, every ~2 s ----

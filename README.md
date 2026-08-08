@@ -51,7 +51,8 @@ subtitles, video adjustments, and track switching, wrapped in a borderless, flui
 - 🪟 **Native feel** — borderless resizable window (drag any edge), aero snap, Win11 rounded
   corners + shadow, fullscreen, always-on-top, letterboxed fluid layout, pinnable control bar.
 - 🎚️ **Transport** — play/pause, drag-to-seek, ±5 s / ±10 s, volume, mute, playback speed
-  (0.25–2×), 3-state repeat, shuffle, playlist with drag-and-drop enqueue.
+  (0.25–2×) with **pitch-preserving time-stretch** (VLC-style, toggleable), 3-state repeat,
+  shuffle, playlist with drag-and-drop enqueue.
 - 🔊 **Proper A/V sync** — audio-master clock, background decode thread, late-frame scheduling.
 - 🖥️ **System integration** — system-wide media keys, single-instance (second launch hands its
   files over), snapshot to PNG (`S`), persistent settings.

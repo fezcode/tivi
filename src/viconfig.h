@@ -12,6 +12,7 @@ typedef struct {
     bool  click_pause;       // single click on the video toggles play/pause
     bool  auto_queue;        // opening one file queues the later episodes in its folder
     bool  pin_controls;      // keep the control bar visible (no auto-hide)
+    bool  pitch_correct;     // playback speed keeps pitch (atempo time-stretch)
     int   theme;             // UI palette index (see THEMES in main.c)
 
     // Video adjustments (VLC "Video Effects" essentials).
