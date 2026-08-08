@@ -591,7 +591,7 @@ static void toggle_maximize(void) {
 // ---------- CLI ----------
 static void print_help(void) {
     printf(
-"tivi %s — a resizable, native video player (Timp-style, FFmpeg-powered)\n\n"
+"tivi %s — a small, native video player (Timp-styled, FFmpeg-powered)\n\n"
 "Usage: tivi [options] [files...]\n\n"
 "Options:\n"
 "  -h, --help       Show this help and exit\n"

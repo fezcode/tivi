@@ -6,7 +6,7 @@ icon    = "assets/tivi.ico"
 
 [meta]
 publisher = "Şamil Bülbül (Fezcode)"
-comments  = "Native, resizable video player"
+comments  = "Small, native video player that plays everything"
 
 [ui]
 theme        = "console"
@@ -23,7 +23,7 @@ keep = ["config.ini"]
 [[steps]]
 type  = "welcome"
 title = "tivi 0.3.0"
-body  = "This wizard will install tivi 0.3.0 on your computer.\n\ntivi is a small, native, resizable video player (FFmpeg-powered, Timp-styled).\n\nClick Next to continue."
+body  = "This wizard will install tivi 0.3.0 on your computer.\n\ntivi is a small, native video player that plays everything (FFmpeg-powered, Timp-styled).\n\nClick Next to continue."
 
 [[steps]]
 type  = "license"

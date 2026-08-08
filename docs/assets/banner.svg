@@ -41,7 +41,7 @@
 
   <!-- wordmark -->
   <text x="204" y="168" font-size="102" font-weight="700" letter-spacing="14" fill="url(#gold)">tivi</text>
-  <text x="210" y="216" font-size="24" fill="#968b72">a small, native, resizable video player &#8212; Hi&#8209;Fi warm.</text>
+  <text x="210" y="216" font-size="24" fill="#968b72">a small, native video player &#8212; plays everything, Hi&#8209;Fi warm.</text>
 
   <!-- theme dots -->
   <g transform="translate(212,252)">
