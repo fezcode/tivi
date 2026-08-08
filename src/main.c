@@ -8,6 +8,7 @@
 
 #include "player.h"
 #include "subs.h"
+#include "yuvtex.h"
 #include "audio_out.h"
 #include "playlist.h"
 #include "osvideo.h"
@@ -178,6 +179,9 @@ static const char *FS_ADJUST =
 "#version 330\n"
 "in vec2 fragTexCoord; in vec4 fragColor;\n"
 "uniform sampler2D texture0; uniform vec4 colDiffuse;\n"
+"uniform sampler2D u_texUV;\n"                       // chroma plane (planar path)
+"uniform int u_convert;\n"                           // 1 = YUV->RGB, 0 = texture0 is RGB
+"uniform vec3 u_c0; uniform vec3 u_c1; uniform vec3 u_c2; uniform vec3 u_yoff;\n"
 "uniform float u_bright; uniform float u_contrast; uniform float u_sat; uniform float u_hue; uniform float u_gamma;\n"
 "out vec4 finalColor;\n"
 "vec3 rgb2hsv(vec3 c){vec4 K=vec4(0.,-1./3.,2./3.,-1.);"
@@ -189,7 +193,14 @@ static const char *FS_ADJUST =
 " vec3 p=abs(fract(c.xxx+K.xyz)*6.-K.www);"
 " return c.z*mix(K.xxx,clamp(p-K.xxx,0.,1.),c.y);}\n"
 "void main(){\n"
-" vec3 c = texture(texture0, fragTexCoord).rgb;\n"
+" vec3 c;\n"
+" if (u_convert == 1) {\n"                            // GPU color conversion (NV12/P010)
+"   float y = texture(texture0, fragTexCoord).r;\n"
+"   vec2 uv = texture(u_texUV, fragTexCoord).rg;\n"
+"   c = clamp(u_c0*y + u_c1*uv.x + u_c2*uv.y + u_yoff, 0.0, 1.0);\n"
+" } else {\n"                                          // compat: texture0 already RGB
+"   c = texture(texture0, fragTexCoord).rgb;\n"
+" }\n"
 " c = pow(max(c,0.0), vec3(1.0/max(u_gamma,0.01)));\n"
 " vec3 hsv = rgb2hsv(c); hsv.x = fract(hsv.x + u_hue/360.0); c = hsv2rgb(hsv);\n"
 " c = (c - 0.5) * u_contrast + 0.5;\n"
@@ -207,6 +218,10 @@ static ViConfig CFG;
 static Texture2D vtex;  static bool vtex_valid; static int vtex_w, vtex_h;
 static Texture2D stex;  static bool stex_valid; static int stex_w, stex_h;
 static Shader    adjShader; static int locBright, locContrast, locSat, locHue, locGamma;
+static int locConvert, locC0, locC1, locC2, locYoff, locTexUV;   // GPU YUV->RGB conversion
+static YuvTex    g_yuv;         // Y/UV plane textures for the shader path
+static YuvXfm    g_yuv_xfm;     // current YUV->RGB transform
+static int       g_perf_vidupd; // perf probe: video texture updates this window
 
 static float g_volume = 0.85f; static bool g_muted = false;
 static int   g_repeat = 0;      // 0 off · 1 one · 2 all
@@ -301,10 +316,34 @@ static void apply_subtitles_for_new_file(void) {
     }
 }
 
+// Push the user's font styling (from CFG) into the subtitle renderer.
+static void apply_sub_style(void) {
+    SubStyle st = { CFG.sub_font, CFG.sub_font_scale, CFG.sub_color, CFG.sub_outline_color, CFG.sub_outline, CFG.sub_shadow };
+    subs_set_style(SUB, &st);
+}
+// Is the current embedded subtitle track authored ASS/SSA (keep its styling) or
+// plain text (apply the user font)?
+static bool cur_sub_is_ass(void) {
+    int cur = player_current_sub(P);
+    if (cur < 0) return false;
+    for (int i = 0; i < player_track_count(P); i++) {
+        const TrackInfo *t = player_track(P, i);
+        if (t->kind == TRACK_SUBTITLE && t->stream_index == cur)
+            return strstr(t->codec, "ass") != NULL || strstr(t->codec, "ssa") != NULL;
+    }
+    return false;
+}
+
 static void load_external_subs(const char *path) {
     if (player_video_width(P) > 0) subs_set_size(SUB, player_video_width(P), player_video_height(P));
     player_set_sub_track(P, -1);
-    if (subs_load_file(SUB, path)) { g_sub_source = SUB_EXTERNAL; g_subs_on = true; snprintf(g_ext_sub_name, sizeof g_ext_sub_name, "%s", GetFileName(path)); osd("Subtitles: %s", GetFileName(path)); }
+    if (subs_load_file(SUB, path)) {
+        g_sub_source = SUB_EXTERNAL; g_subs_on = true;
+        const char *e = GetFileExtension(path);
+        bool styled = e && (!strcmp(e, ".ass") || !strcmp(e, ".ssa"));
+        subs_set_plaintext(SUB, !styled);
+        snprintf(g_ext_sub_name, sizeof g_ext_sub_name, "%s", GetFileName(path)); osd("Subtitles: %s", GetFileName(path));
+    }
     else osd("Could not load subtitles");
 }
 
@@ -326,6 +365,19 @@ static void load_file(const char *path) {
     apply_subtitles_for_new_file();
     player_play(P);
     g_last_activity = GetTime();
+}
+
+// Reopen the current file in place (used when a setting like hardware decoding
+// only takes effect at decoder-open time), preserving position, speed and state.
+static void reload_current(void) {
+    if (!player_is_open(P)) return;
+    char path[1024]; snprintf(path, sizeof path, "%s", player_path(P));
+    double pos = player_position(P), spd = player_speed(P);
+    bool was_playing = player_is_playing(P);
+    load_file(path);
+    player_set_speed(P, spd);
+    if (pos > 0) player_seek(P, pos);
+    if (!was_playing) player_pause(P);
 }
 
 static void add_cb(const char *path, void *ud) { (void)ud; playlist_add(&PL, path); }
@@ -351,8 +403,8 @@ static void set_volume(float v) { g_volume = clampf(v, 0, 1); g_muted = false; p
 static void toggle_mute(void)   { g_muted = !g_muted; player_set_volume(P, g_muted ? 0.0f : g_volume); osd(g_muted ? "Muted" : "Volume %d%%", (int)(g_volume * 100 + 0.5f)); }
 
 static void snapshot(void) {
-    uint8_t *rgba; int w, h; bool ch;
-    if (!player_frame(P, &rgba, &w, &h, &ch)) { osd("No frame to snapshot"); return; }
+    uint8_t *rgba; int w, h;
+    if (!player_snapshot_rgba(P, &rgba, &w, &h)) { osd("No frame to snapshot"); return; }
     Image im = { rgba, w, h, 1, PIXELFORMAT_UNCOMPRESSED_R8G8B8A8 };
     char name[256]; snprintf(name, sizeof(name), "tivi_snapshot_%ld.png", (long)time(NULL));
     if (ExportImage(im, name)) osd("Saved %s", name); else osd("Snapshot failed");
@@ -502,9 +554,18 @@ int main(int argc, char **argv) {
     locSat = GetShaderLocation(adjShader, "u_sat");
     locHue = GetShaderLocation(adjShader, "u_hue");
     locGamma = GetShaderLocation(adjShader, "u_gamma");
+    locConvert = GetShaderLocation(adjShader, "u_convert");
+    locC0 = GetShaderLocation(adjShader, "u_c0");
+    locC1 = GetShaderLocation(adjShader, "u_c1");
+    locC2 = GetShaderLocation(adjShader, "u_c2");
+    locYoff = GetShaderLocation(adjShader, "u_yoff");
+    locTexUV = GetShaderLocation(adjShader, "u_texUV");
 
     P = player_create();
+    player_set_hw_decode(P, CFG.hw_decode);
+    player_set_gpu_convert(P, CFG.gpu_convert);
     SUB = subs_create();
+    apply_sub_style();
 
     mediakeys_start();
 
@@ -517,7 +578,8 @@ int main(int argc, char **argv) {
     g_last_activity = GetTime();
     Vector2 lastMouse = GetMousePosition();
     double last_click_t = -1; int shot_frame = getenv("TIVI_SHOT") ? 120 : -1, frame = 0;
-    if (shot_frame > 0) g_panel = PANEL_SETTINGS;   // dev hook: screenshot the settings UI
+    if (shot_frame > 0) { g_panel = PANEL_SETTINGS;   // dev hook: screenshot the settings UI
+        if (getenv("TIVI_SHOT_SCROLL")) g_set_scroll = (float)atoi(getenv("TIVI_SHOT_SCROLL")); }
 
     // Supersampled render target: the whole UI is drawn at SS× then downscaled with
     // bilinear filtering, giving smooth anti-aliasing on every shape, icon and glyph.
@@ -790,6 +852,7 @@ int main(int argc, char **argv) {
                     int hs; const uint8_t *hd = player_sub_header(P, &hs);
                     subs_set_size(SUB, player_video_width(P), player_video_height(P));
                     subs_begin_embedded(SUB, hd, hs);
+                    subs_set_plaintext(SUB, !cur_sub_is_ass());
                     // demux the whole track in the background — once it swaps in,
                     // seeking can never land on a missing line
                     subs_preload_start(SUB, player_path(P), player_current_sub(P));
@@ -820,17 +883,42 @@ int main(int argc, char **argv) {
         // video rect (letterboxed)
         Rectangle vr = { 0, 0, 0, 0 };
         if (open && player_has_video(P)) {
-            uint8_t *rgba; int fw, fh; bool changed;
-            if (player_frame(P, &rgba, &fw, &fh, &changed)) {
-                ensure_vtex(fw, fh);
-                if (changed) UpdateTexture(vtex, rgba);
+            TiviFrame frm; bool changed;
+            bool planar = false;
+            if (player_frame(P, &frm, &changed)) {
+                if (changed) g_perf_vidupd++;
+                if (frm.fmt == TIVI_PIX_RGBA) {
+                    ensure_vtex(frm.w, frm.h);
+                    if (changed) UpdateTexture(vtex, frm.plane[0]);
+                } else {
+                    // GPU color-conversion path: (re)upload the Y/UV planes on a new
+                    // frame or geometry change, and refresh the conversion transform.
+                    if (changed || !g_yuv.valid || g_yuv.w != frm.w || g_yuv.h != frm.h || g_yuv.fmt != frm.fmt) {
+                        if (yuvtex_update(&g_yuv, &frm)) g_yuv_xfm = yuvtex_transform(&frm);
+                    }
+                    planar = g_yuv.valid;
+                }
             }
             float vw = (float)player_video_width(P), vh = (float)player_video_height(P);
             float scale = fminf(W / vw, H / vh);
             float dw = vw * scale, dh = vh * scale;
             vr = (Rectangle){ (W - dw) / 2, (H - dh) / 2, dw, dh };
-            if (vtex_valid) {
+            if (planar) {
                 apply_adjustments_uniforms();
+                int conv = 1;
+                SetShaderValue(adjShader, locConvert, &conv, SHADER_UNIFORM_INT);
+                SetShaderValue(adjShader, locC0, &g_yuv_xfm.c0, SHADER_UNIFORM_VEC3);
+                SetShaderValue(adjShader, locC1, &g_yuv_xfm.c1, SHADER_UNIFORM_VEC3);
+                SetShaderValue(adjShader, locC2, &g_yuv_xfm.c2, SHADER_UNIFORM_VEC3);
+                SetShaderValue(adjShader, locYoff, &g_yuv_xfm.off, SHADER_UNIFORM_VEC3);
+                SetShaderValueTexture(adjShader, locTexUV, g_yuv.uv);
+                BeginShaderMode(adjShader);
+                DrawTexturePro(g_yuv.y, (Rectangle){ 0, 0, (float)g_yuv.w, (float)g_yuv.h }, vr, (Vector2){ 0, 0 }, 0, WHITE);
+                EndShaderMode();
+            } else if (vtex_valid) {
+                apply_adjustments_uniforms();
+                int conv = 0;
+                SetShaderValue(adjShader, locConvert, &conv, SHADER_UNIFORM_INT);
                 BeginShaderMode(adjShader);
                 DrawTexturePro(vtex, (Rectangle){ 0, 0, (float)vtex_w, (float)vtex_h }, vr, (Vector2){ 0, 0 }, 0, WHITE);
                 EndShaderMode();
@@ -849,6 +937,10 @@ int main(int argc, char **argv) {
                     if (player_active_sub_bitmap(P, &sb, &sw, &sh)) { ensure_stex(sw, sh); UpdateTexture(stex, sb);
                         DrawTexturePro(stex, (Rectangle){ 0, 0, (float)sw, (float)sh }, svr, (Vector2){ 0, 0 }, 0, WHITE); }
                 } else if (g_sub_source != SUB_NONE) {
+                    // Render the libass overlay at the on-screen video size (not the
+                    // video's native size) so glyphs rasterize at display resolution —
+                    // crisp AA like VLC instead of a stretched low-res bitmap.
+                    subs_set_size(SUB, (int)vr.width, (int)vr.height);
                     uint8_t *sr; int sw, sh; bool sch;
                     if (subs_render(SUB, (long long)(player_position(P) * 1000.0), &sr, &sw, &sh, &sch)) {
                         ensure_stex(sw, sh); if (sch) UpdateTexture(stex, sr);
@@ -1207,6 +1299,128 @@ int main(int argc, char **argv) {
                     yy += 48;
                 }
 
+                // ---- Performance (GPU acceleration) ----
+                DrawLineEx((Vector2){ px, yy }, (Vector2){ px + iw, yy }, 1, alpha(WHITE, 16)); yy += 14;
+                DrawTextEx(fSmall, "PERFORMANCE", (Vector2){ px, yy }, 15, 3.0f, alpha(ACCENT, 200)); yy += 26;
+                {
+                    const char *pl[2] = { "Hardware decoding", "GPU color conversion" };
+                    bool pvv[2] = { CFG.hw_decode, CFG.gpu_convert };
+                    for (int i = 0; i < 2; i++) {
+                        Rectangle row = { px - 6, yy - 6, iw + 12, 46 };
+                        bool hov = inview && CheckCollisionPointRec(mp, row);
+                        if (hov) DrawRectangleRounded(row, 0.3f, 6, alpha(WHITE, 10));
+                        DrawTextEx(fSmall, pl[i], (Vector2){ px, yy + 6 }, 20, 0.3f, TXT);
+                        float tx = panelR.x + panelR.width - 76;
+                        DrawRectangleRounded((Rectangle){ tx, yy, 54, 28 }, 1, 8, pvv[i] ? ACCENT : TRK);
+                        scircle(pvv[i] ? tx + 39 : tx + 15, yy + 14, 11, pvv[i] ? BG1 : alpha(TXT, 210));
+                        if (hov && IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) {
+                            if (i == 0) { CFG.hw_decode = !CFG.hw_decode; player_set_hw_decode(P, CFG.hw_decode);
+                                          reload_current(); osd("Hardware decoding %s", CFG.hw_decode ? "On" : "Off"); }
+                            else        { CFG.gpu_convert = !CFG.gpu_convert; player_set_gpu_convert(P, CFG.gpu_convert);
+                                          osd("GPU color conversion %s", CFG.gpu_convert ? "On" : "Off"); }
+                            consumed = true;
+                        }
+                        yy += 50;
+                    }
+                    char stat[112];
+                    if (open && player_has_video(P))
+                        snprintf(stat, sizeof stat, "Active:  %s  ·  %s", player_decode_desc(P), player_convert_desc(P));
+                    else snprintf(stat, sizeof stat, "Active:  (no video loaded)");
+                    DrawTextEx(fSmall, stat, (Vector2){ px, yy }, 16, 0.2f, alpha(MUT, 200)); yy += 30;
+                }
+
+                // ---- Subtitles (font styling for plain-text subs) ----
+                DrawLineEx((Vector2){ px, yy }, (Vector2){ px + iw, yy }, 1, alpha(WHITE, 16)); yy += 14;
+                DrawTextEx(fSmall, "SUBTITLES", (Vector2){ px, yy }, 15, 3.0f, alpha(ACCENT, 200)); yy += 26;
+                {
+                    // font family stepper: < Name >
+                    static const char *FONTS[] = { "sans-serif", "Segoe UI", "Arial", "Verdana", "Tahoma",
+                                                   "Calibri", "Georgia", "Times New Roman", "Consolas", "Comic Sans MS" };
+                    const int NF = (int)(sizeof(FONTS) / sizeof(FONTS[0]));
+                    DrawTextEx(fSmall, "Font", (Vector2){ px, yy + 4 }, 20, 0.3f, TXT);
+                    int ci = 0; for (int k = 0; k < NF; k++) if (!strcmp(FONTS[k], CFG.sub_font)) { ci = k; break; }
+                    float bw = 168, bx = panelR.x + panelR.width - 22 - bw;
+                    Rectangle lb = { bx, yy, 26, 28 }, rb = { bx + bw - 26, yy, 26, 28 };
+                    bool hl = inview && CheckCollisionPointRec(mp, lb), hr = inview && CheckCollisionPointRec(mp, rb);
+                    DrawRectangleRounded(lb, 0.4f, 6, hl ? alpha(WHITE, 24) : TRK);
+                    DrawRectangleRounded(rb, 0.4f, 6, hr ? alpha(WHITE, 24) : TRK);
+                    DrawTextEx(fSmall, "<", (Vector2){ lb.x + 9, yy + 4 }, 20, 0, TXT);
+                    DrawTextEx(fSmall, ">", (Vector2){ rb.x + 9, yy + 4 }, 20, 0, TXT);
+                    Vector2 nm = MeasureTextEx(fSmall, FONTS[ci], 16, 0.2f);
+                    DrawTextEx(fSmall, FONTS[ci], (Vector2){ bx + 26 + (bw - 52 - nm.x) / 2, yy + 6 }, 16, 0.2f, ACCENT);
+                    if ((hl || hr) && IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) {
+                        ci = (ci + (hr ? 1 : NF - 1)) % NF;
+                        snprintf(CFG.sub_font, sizeof CFG.sub_font, "%s", FONTS[ci]);
+                        apply_sub_style(); consumed = true;
+                    }
+                    yy += 44;
+
+                    // size scale slider
+                    DrawTextEx(fSmall, "Size", (Vector2){ px, yy }, 19, 0.3f, TXT);
+                    char sv[12]; snprintf(sv, sizeof sv, "%.2fx", CFG.sub_font_scale);
+                    Vector2 svm = MeasureTextEx(fSmall, sv, 19, 0.3f);
+                    DrawTextEx(fSmall, sv, (Vector2){ panelR.x + panelR.width - 18 - svm.x, yy }, 19, 0.3f, ACCENT);
+                    {
+                        const float LO = 0.25f, HI = 2.5f;
+                        Rectangle str = { px, yy + 30, iw, 6 };
+                        float fr = clampf((CFG.sub_font_scale - LO) / (HI - LO), 0, 1);
+                        DrawRectangleRounded(str, 1, 6, TRK);
+                        DrawRectangleRounded((Rectangle){ str.x, str.y, str.width * fr, str.height }, 1, 6, ACCENT);
+                        scircle(str.x + str.width * fr, str.y + 3, 8, TXT);
+                        Rectangle hit = { str.x - 4, str.y - 11, str.width + 8, 28 };
+                        if (inview && CheckCollisionPointRec(mp, hit) && IsMouseButtonDown(MOUSE_BUTTON_LEFT)) {
+                            float nv = LO + clampf((mp.x - str.x) / str.width, 0, 1) * (HI - LO);
+                            nv = roundf(nv * 20.0f) / 20.0f; if (fabsf(nv - 1.0f) < 0.03f) nv = 1.0f;
+                            CFG.sub_font_scale = nv; apply_sub_style(); consumed = true;
+                        }
+                    }
+                    yy += 50;
+
+                    // colour swatch rows: text fill + outline
+                    static const unsigned PAL[7] = { 0xFFFFFF, 0xFFEB3B, 0x00E5FF, 0x76FF03, 0xFF5252, 0xFF9800, 0x000000 };
+                    for (int rowk = 0; rowk < 2; rowk++) {
+                        unsigned cur = rowk ? CFG.sub_outline_color : CFG.sub_color;
+                        DrawTextEx(fSmall, rowk ? "Outline color" : "Text color", (Vector2){ px, yy + 6 }, 20, 0.3f, TXT);
+                        float sw = 24, gap = 8; int NP = 7;
+                        float tx = panelR.x + panelR.width - 22 - NP * (sw + gap) + gap;
+                        for (int k = 0; k < NP; k++) {
+                            Rectangle cell = { tx + k * (sw + gap), yy, sw, sw };
+                            bool hs = inview && CheckCollisionPointRec(mp, cell);
+                            Color cc = { (unsigned char)(PAL[k] >> 16), (unsigned char)(PAL[k] >> 8), (unsigned char)PAL[k], 255 };
+                            DrawRectangleRounded(cell, 0.4f, 6, cc);
+                            if (cur == PAL[k])  DrawRectangleRoundedLines(cell, 0.4f, 6, ACCENT);
+                            else if (hs)        DrawRectangleRoundedLines(cell, 0.4f, 6, alpha(TXT, 140));
+                            else                DrawRectangleRoundedLines(cell, 0.4f, 6, alpha(WHITE, 30));
+                            if (hs && IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) {
+                                if (rowk) CFG.sub_outline_color = PAL[k]; else CFG.sub_color = PAL[k];
+                                apply_sub_style(); consumed = true;
+                            }
+                        }
+                        yy += 40;
+                    }
+
+                    // outline width + shadow depth sliders (0–4 px)
+                    for (int slk = 0; slk < 2; slk++) {
+                        float *pval = slk ? &CFG.sub_shadow : &CFG.sub_outline;
+                        DrawTextEx(fSmall, slk ? "Shadow" : "Outline", (Vector2){ px, yy }, 19, 0.3f, TXT);
+                        char vv[12]; snprintf(vv, sizeof vv, "%.1f px", *pval);
+                        Vector2 vm = MeasureTextEx(fSmall, vv, 19, 0.3f);
+                        DrawTextEx(fSmall, vv, (Vector2){ panelR.x + panelR.width - 18 - vm.x, yy }, 19, 0.3f, ACCENT);
+                        const float LO = 0.0f, HI = 4.0f;
+                        Rectangle str = { px, yy + 30, iw, 6 };
+                        float fr = clampf((*pval - LO) / (HI - LO), 0, 1);
+                        DrawRectangleRounded(str, 1, 6, TRK);
+                        DrawRectangleRounded((Rectangle){ str.x, str.y, str.width * fr, str.height }, 1, 6, ACCENT);
+                        scircle(str.x + str.width * fr, str.y + 3, 8, TXT);
+                        Rectangle hit = { str.x - 4, str.y - 11, str.width + 8, 28 };
+                        if (inview && CheckCollisionPointRec(mp, hit) && IsMouseButtonDown(MOUSE_BUTTON_LEFT)) {
+                            float nv = LO + clampf((mp.x - str.x) / str.width, 0, 1) * (HI - LO);
+                            *pval = roundf(nv * 10.0f) / 10.0f; apply_sub_style(); consumed = true;
+                        }
+                        yy += 50;
+                    }
+                }
+
                 // about
                 DrawLineEx((Vector2){ px, yy }, (Vector2){ px + iw, yy }, 1, alpha(WHITE, 16));
                 yy += 14;
@@ -1264,6 +1478,39 @@ int main(int argc, char **argv) {
         frame++;
         if (shot_frame > 0 && frame == shot_frame) TakeScreenshot("tivi_shot.png");
         if (shot_frame > 0 && frame == shot_frame + 3) break;
+        // dev hook: scripted relative seeks (+5, +5, -5) to test seek precision headlessly
+        {
+            static int seektest = -1; if (seektest < 0) seektest = getenv("TIVI_SEEKTEST") ? 1 : 0;
+            if (seektest && open && (frame == 240 || frame == 480)) player_seek_relative(P, 5);
+            if (seektest && open && frame == 720)                   player_seek_relative(P, -5);
+        }
+
+        // ---- perf probe (TIVI_PERF=1): UI fps + video update rate, every ~2 s ----
+        {
+            static int perf = -1; if (perf < 0) perf = getenv("TIVI_PERF") ? 1 : 0;
+            if (perf) {
+                static double w0 = 0, worst = 0, lastpos = 0, maxstep = 0; static int n = 0, stalls = 0, lurches = 0;
+                double t = GetTime(), ft = t - now;
+                if (w0 == 0) w0 = t;
+                if (ft > worst) worst = ft;
+                double pos = open ? player_position(P) : 0;
+                double dstep = pos - lastpos; lastpos = pos;
+                if (playing && dstep >= 0) {
+                    if (dstep < 0.0005) stalls++;
+                    else if (dstep > 0.030) lurches++;
+                    if (dstep > maxstep) maxstep = dstep;
+                }
+                n++;
+                if (t - w0 >= 2.0) {
+                    unsigned acb, amax; audio_out_perf(&acb, &amax);
+                    printf("[perf] ui: %.1f fps (worst %.0f ms)  video: %.1f fps  clock: %d stalls %d lurches (max %.0f ms)  audio-cb: %u/win max %u fr  win %dx%d\n",
+                           n / (t - w0), worst * 1000.0, g_perf_vidupd / (t - w0),
+                           stalls, lurches, maxstep * 1000.0, acb, amax, W, H);
+                    fflush(stdout);
+                    w0 = t; n = 0; worst = 0; g_perf_vidupd = 0; stalls = lurches = 0; maxstep = 0;
+                }
+            }
+        }
     }
     UnloadRenderTexture(target);
 
@@ -1276,6 +1523,7 @@ int main(int argc, char **argv) {
     player_destroy(P);
     subs_destroy(SUB);
     destroy_textures();
+    yuvtex_destroy(&g_yuv);
     UnloadShader(adjShader);
     audio_out_shutdown();
     CloseAudioDevice();

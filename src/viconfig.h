@@ -19,6 +19,18 @@ typedef struct {
     float hue;               // -180..180 degrees (0 = neutral)
     float gamma;             // 0.2..3  (1 = neutral)
 
+    // Performance / GPU acceleration.
+    bool  hw_decode;         // true = auto D3D11VA GPU decode (+fallback); false = force software
+    bool  gpu_convert;       // true = shader YUV->RGB; false = force CPU sws_scale
+
+    // Subtitle font styling (applied to plain-text subs only; ASS/SSA keep their own).
+    char     sub_font[64];       // family name, default "sans-serif"
+    float    sub_font_scale;     // 0.25..2.5 (1 = default)
+    unsigned sub_color;          // 0xRRGGBB fill
+    unsigned sub_outline_color;  // 0xRRGGBB outline
+    float    sub_outline;        // 0..4 px
+    float    sub_shadow;         // 0..4 px
+
     int   win_x, win_y, win_w, win_h;
     bool  has_win;
 } ViConfig;

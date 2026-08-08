@@ -42,6 +42,13 @@ struct Subs {
     SubEvent *pre_ev; int pre_n;
     uint8_t  *pre_hdr; int pre_hdr_sz;
     bool     preloaded;
+
+    // user font styling (plain-text tracks only)
+    bool      have_style, plaintext;
+    char      font_buf[64];
+    float     st_scale, st_outline, st_shadow;
+    unsigned  st_color, st_outline_color;
+    ASS_Style ov;
 };
 
 static void ass_quiet(int level, const char *fmt, va_list args, void *data) {
@@ -62,6 +69,7 @@ Subs *subs_create(void) {
 }
 
 static void preload_cancel(Subs *s);
+static void apply_style_override(Subs *s);
 
 void subs_destroy(Subs *s) {
     if (!s) return;
@@ -75,6 +83,7 @@ void subs_destroy(Subs *s) {
 
 void subs_set_size(Subs *s, int w, int h) {
     if (w <= 0 || h <= 0) return;
+    if (w == s->w && h == s->h && s->overlay) return;   // cheap to call every frame
     s->w = w; s->h = h;
     ass_set_frame_size(s->renderer, w, h);
     ass_set_storage_size(s->renderer, w, h);
@@ -91,6 +100,60 @@ void subs_set_size(Subs *s, int w, int h) {
         s->overlay_sz = s->overlay ? need : 0;
     }
     s->have_content = false;
+    apply_style_override(s);   // FontSize is proportional to video height
+}
+
+// 0xRRGGBB -> libass colour (0xRRGGBBAA, AA = transparency; 0 = opaque).
+static uint32_t ass_rgb(unsigned rgb) {
+    return ((uint32_t)(rgb & 0xFFFFFF) << 8);
+}
+
+// Push the user font style into the renderer as a selective style override,
+// enabled only for plain-text tracks so authored ASS/SSA styling is preserved.
+static void apply_style_override(Subs *s) {
+    if (!s->renderer) return;
+    memset(&s->ov, 0, sizeof(s->ov));
+    static char empty[] = "";
+    static char deflt[] = "sans-serif";
+    s->ov.Name        = empty;
+    s->ov.FontName    = s->font_buf[0] ? s->font_buf : deflt;
+    // ASS style values are in script units (PlayResY = 288 for FFmpeg-converted
+    // subs), NOT frame pixels — libass scales them to the render frame itself.
+    // 16 @288 is FFmpeg's own default, ≈5.5% of the picture height (VLC-like).
+    s->ov.FontSize    = 16.0 * (s->have_style ? s->st_scale : 1.0f);
+    s->ov.ScaleX = s->ov.ScaleY = 1.0; s->ov.Spacing = 0.0;
+    s->ov.PrimaryColour = s->ov.SecondaryColour = ass_rgb(s->have_style ? s->st_color : 0xFFFFFF);
+    s->ov.OutlineColour = ass_rgb(s->have_style ? s->st_outline_color : 0x000000);
+    s->ov.BackColour    = ass_rgb(0x000000);
+    s->ov.BorderStyle   = 1;                                // outline + drop shadow
+    s->ov.Outline       = s->have_style ? s->st_outline : 2.0;
+    s->ov.Shadow        = s->have_style ? s->st_shadow  : 0.0;
+    s->ov.Bold          = 1;                                // VLC-style weight for plain subs
+    ass_set_selective_style_override(s->renderer, &s->ov);
+    int bits = (s->have_style && s->plaintext)
+             ? (ASS_OVERRIDE_BIT_FONT_NAME | ASS_OVERRIDE_BIT_FONT_SIZE_FIELDS |
+                ASS_OVERRIDE_BIT_COLORS | ASS_OVERRIDE_BIT_BORDER | ASS_OVERRIDE_BIT_ATTRIBUTES)
+             : 0;
+    ass_set_selective_style_override_enabled(s->renderer, bits);
+    s->have_content = false;   // force a re-render with the new style
+}
+
+void subs_set_style(Subs *s, const SubStyle *st) {
+    if (!s || !st) return;
+    snprintf(s->font_buf, sizeof(s->font_buf), "%s", (st->font && st->font[0]) ? st->font : "sans-serif");
+    s->st_scale         = st->scale > 0 ? st->scale : 1.0f;
+    s->st_color         = st->color;
+    s->st_outline_color = st->outline_color;
+    s->st_outline       = st->outline;
+    s->st_shadow        = st->shadow;
+    s->have_style       = true;
+    apply_style_override(s);
+}
+
+void subs_set_plaintext(Subs *s, bool plaintext) {
+    if (!s) return;
+    s->plaintext = plaintext;
+    apply_style_override(s);
 }
 
 void subs_set_bottom_margin(Subs *s, int px) {

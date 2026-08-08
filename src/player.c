@@ -8,6 +8,9 @@
 #include <libavutil/channel_layout.h>
 #include <libswscale/swscale.h>
 #include <libswresample/swresample.h>
+#include <libavutil/hwcontext.h>
+#include <libavutil/pixdesc.h>
+#include <libavutil/time.h>
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -61,6 +64,25 @@ struct Player {
     struct SwsContext *sws;
     struct SwrContext *swr;
 
+    // GPU (D3D11VA) video decode. hw_pix_fmt == AV_PIX_FMT_NONE means the video
+    // stream is decoded in software (no GPU, or the GPU can't handle this codec).
+    AVBufferRef       *hw_device_ctx;   // D3D11 device (our ref; the decoder holds its own)
+    enum AVPixelFormat hw_pix_fmt;      // format the decoder emits for GPU frames
+    AVFrame           *hwsw;            // scratch frame for GPU->CPU readback
+    bool               hw_logged;       // one-shot "which path is active" log
+
+    // acceleration controls + planar-output state
+    bool  want_hw;              // attempt GPU decode (settings; read at open time)
+    bool  want_gpu_convert;     // emit planar YUV for shader color conversion
+    bool  v_live;               // real video stream (not cover art) — drives A/V pacing
+    double preroll_to;          // precise seek: drop decoded output before this time
+    bool  hw_in_use;            // a GPU-format frame was actually received
+    int   v_colorspace;         // 0 = BT.601, 1 = BT.709   (per stream)
+    int   v_range;              // 0 = limited, 1 = full
+    int   v_bitdepth;           // 8 or 10
+    TiviPixFmt disp_fmt;        // pixel layout currently in disp_buf
+    struct SwsContext *snap_sws; uint8_t *snap_rgba;   // lazy RGBA scratch for snapshots
+
     int v_stream, a_stream, s_stream;
     AVRational v_tb, a_tb, s_tb;
     int vw, vh;
@@ -77,7 +99,7 @@ struct Player {
     uint8_t *vbuf[VPOOL];
     size_t   vbuf_sz;
     int      vfree[VPOOL], nfree;
-    struct { int buf; double pts; } vq[VPOOL];
+    struct { int buf; double pts; TiviPixFmt fmt; } vq[VPOOL];
     int      vqh, vqn;
     int      disp_buf;            // index held for display, -1 = none
     double   disp_pts;
@@ -128,6 +150,40 @@ static void str_copy(char *dst, int cap, const char *src) {
     snprintf(dst, cap, "%s", src);
 }
 
+// Decoder callback: FFmpeg offers the pixel formats it can output for this frame.
+// Pick the GPU (D3D11) format when it's on offer; otherwise let FFmpeg choose a
+// software format — that's the per-stream fallback when the GPU can't decode this
+// profile/bit-depth (e.g. an old card facing 10-bit HEVC).
+static enum AVPixelFormat get_hw_format(AVCodecContext *ctx, const enum AVPixelFormat *fmts) {
+    Player *p = (Player *)ctx->opaque;
+    for (const enum AVPixelFormat *f = fmts; *f != AV_PIX_FMT_NONE; f++)
+        if (*f == p->hw_pix_fmt) return *f;
+    return avcodec_default_get_format(ctx, fmts);   // GPU declined -> software
+}
+
+// Try to attach a D3D11VA GPU device to this video decoder. On any failure
+// (decoder has no D3D11VA config, no compatible GPU, driver refuses) it leaves
+// the context untouched, so the caller silently gets a normal software decoder.
+static void try_enable_hw(Player *p, AVCodecContext *ctx, const AVCodec *dec) {
+    if (!p->want_hw) return;                 // hardware decode disabled in settings
+    const enum AVHWDeviceType type = AV_HWDEVICE_TYPE_D3D11VA;
+    enum AVPixelFormat hwfmt = AV_PIX_FMT_NONE;
+    for (int i = 0;; i++) {
+        const AVCodecHWConfig *cfg = avcodec_get_hw_config(dec, i);
+        if (!cfg) return;   // decoder can't do D3D11VA (e.g. AV1 on a build without it)
+        if ((cfg->methods & AV_CODEC_HW_CONFIG_METHOD_HW_DEVICE_CTX) && cfg->device_type == type) {
+            hwfmt = cfg->pix_fmt; break;
+        }
+    }
+    AVBufferRef *dev = NULL;
+    if (av_hwdevice_ctx_create(&dev, type, NULL, NULL, 0) < 0) return;   // no usable GPU
+    ctx->hw_device_ctx = av_buffer_ref(dev);
+    ctx->opaque        = p;
+    ctx->get_format    = get_hw_format;
+    p->hw_device_ctx   = dev;      // our own ref, released in player_close
+    p->hw_pix_fmt      = hwfmt;
+}
+
 // Open a decoder context for a stream. Returns NULL on failure.
 static AVCodecContext *open_stream_decoder(Player *p, int stream_index) {
     AVStream *st = p->fmt->streams[stream_index];
@@ -138,8 +194,9 @@ static AVCodecContext *open_stream_decoder(Player *p, int stream_index) {
     if (avcodec_parameters_to_context(ctx, st->codecpar) < 0) { avcodec_free_context(&ctx); return NULL; }
     ctx->pkt_timebase = st->time_base;
     if (st->codecpar->codec_type == AVMEDIA_TYPE_VIDEO) {
-        ctx->thread_count = 0;                 // auto: use all cores
+        ctx->thread_count = 0;                 // auto: use all cores (software fallback)
         ctx->thread_type  = FF_THREAD_FRAME | FF_THREAD_SLICE;
+        try_enable_hw(p, ctx, dec);            // offload to GPU when possible
     }
     if (avcodec_open2(ctx, dec, NULL) < 0) { avcodec_free_context(&ctx); return NULL; }
     return ctx;
@@ -176,36 +233,132 @@ static int acquire_buf(Player *p) {
     return idx;
 }
 
-static void enqueue_buf(Player *p, int idx, double pts) {
+static void enqueue_buf(Player *p, int idx, double pts, TiviPixFmt fmt) {
+    {   // perf probe: dump the first queued pts values to check spacing
+        static int perf = -1; if (perf < 0) perf = getenv("TIVI_PERF") ? 1 : 0;
+        static int dumped = 0;
+        if (perf && dumped < 16) { printf("[perf] enq pts %.4f\n", pts); fflush(stdout); dumped++; }
+    }
     M_lock(&p->lock);
     if (p->stop || p->seek_req) { p->vfree[p->nfree++] = idx; M_unlock(&p->lock); return; }
     int t = (p->vqh + p->vqn) % VPOOL;
-    p->vq[t].buf = idx; p->vq[t].pts = pts; p->vqn++;
+    p->vq[t].buf = idx; p->vq[t].pts = pts; p->vq[t].fmt = fmt; p->vqn++;
     C_wakeall(&p->cond);
     M_unlock(&p->lock);
 }
 
+// Map an FFmpeg frame's colour metadata onto our per-stream ints (constant per stream).
+static void capture_color_info(Player *p, const AVFrame *f) {
+    switch (f->colorspace) {
+        case AVCOL_SPC_BT709:                             p->v_colorspace = 1; break;
+        case AVCOL_SPC_BT470BG: case AVCOL_SPC_SMPTE170M: p->v_colorspace = 0; break;
+        default:                p->v_colorspace = (p->vh >= 720) ? 1 : 0;      break;  // unspecified
+    }
+    p->v_range = (f->color_range == AVCOL_RANGE_JPEG) ? 1 : 0;
+}
+
+static void copy_plane(uint8_t *dst, int dst_stride, const uint8_t *src, int src_stride, int row_bytes, int rows) {
+    for (int y = 0; y < rows; y++)
+        memcpy(dst + (size_t)y * dst_stride, src + (size_t)y * src_stride, row_bytes);
+}
+
+// Pack a semi-planar (NV12/P010) frame tightly into a pool slot: Y then interleaved UV.
+static void pack_planar(Player *p, int idx, const AVFrame *src, int bytes) {
+    int cw = (p->vw + 1) / 2, ch = (p->vh + 1) / 2;
+    uint8_t *y  = p->vbuf[idx];
+    uint8_t *uv = y + (size_t)p->vw * bytes * p->vh;
+    copy_plane(y,  p->vw * bytes,  src->data[0], src->linesize[0], p->vw * bytes,  p->vh);
+    copy_plane(uv, cw * 2 * bytes, src->data[1], src->linesize[1], cw * 2 * bytes, ch);
+}
+
 static void decode_video(Player *p, AVPacket *pkt, AVFrame *frame) {
+    // perf probe (TIVI_PERF=1): per-stage decode timings, reported every 120 frames
+    static int perf = -1; if (perf < 0) perf = getenv("TIVI_PERF") ? 1 : 0;
+    static double s_recv, s_xfer, s_wait, s_pack; static int s_n; static int64_t s_w0;
     if (avcodec_send_packet(p->vdec, pkt) < 0) return;
-    while (avcodec_receive_frame(p->vdec, frame) == 0) {
+    for (;;) {
+        int64_t ptA = av_gettime_relative();
+        if (avcodec_receive_frame(p->vdec, frame) != 0) break;
+        int64_t ptB = av_gettime_relative();
         int64_t ts = frame->best_effort_timestamp;
         if (ts == AV_NOPTS_VALUE) ts = frame->pts;
         double pts = (ts == AV_NOPTS_VALUE) ? p->v_clock : ts * av_q2d(p->v_tb);
 
-        int idx = acquire_buf(p);
-        if (idx < 0) { av_frame_unref(frame); return; }   // aborted (stop/seek/track switch)
+        // Seek preroll: this frame is before the seek target — it had to be decoded
+        // (reference chain) but must not be shown. Drop it before the expensive
+        // GPU readback / conversion. Keep the one frame straddling the target so
+        // there's a picture the moment we arrive.
+        double fdur = (p->fps > 1.0) ? 1.0 / p->fps : 0.04;
+        if (pts < p->preroll_to - fdur) { av_frame_unref(frame); continue; }
 
-        p->sws = sws_getCachedContext(p->sws, frame->width, frame->height, frame->format,
-                                      p->vw, p->vh, AV_PIX_FMT_RGBA, SWS_BILINEAR, NULL, NULL, NULL);
-        if (p->sws) {
-            uint8_t *dst[4] = { p->vbuf[idx], NULL, NULL, NULL };
-            int dstst[4]    = { p->vw * 4, 0, 0, 0 };
-            sws_scale(p->sws, (const uint8_t * const *)frame->data, frame->linesize, 0, frame->height, dst, dstst);
-            enqueue_buf(p, idx, pts);
+        // A GPU-decoded frame lives in VRAM (format == hw_pix_fmt); copy it down to
+        // a CPU frame (NV12 / P010) before color conversion. A software-decoded
+        // frame (GPU fallback for this stream) is already usable as-is.
+        AVFrame *src = frame;
+        if (p->hw_pix_fmt != AV_PIX_FMT_NONE && frame->format == p->hw_pix_fmt) {
+            if (!p->hwsw) p->hwsw = av_frame_alloc();
+            if (!p->hwsw || av_hwframe_transfer_data(p->hwsw, frame, 0) < 0) {
+                av_frame_unref(frame); continue;      // readback failed — drop this frame
+            }
+            src = p->hwsw;
+        }
+        p->hw_in_use = (src == p->hwsw);
+        int64_t ptC = av_gettime_relative();
+
+        // Fast path: hand the shader packed planar YUV. Only when GPU conversion is
+        // enabled, the layout is NV12/P010, and dims match the pool/texture sizing.
+        bool fast = p->want_gpu_convert && src->width == p->vw && src->height == p->vh &&
+                    (src->format == AV_PIX_FMT_NV12 || src->format == AV_PIX_FMT_P010LE);
+        TiviPixFmt tf = !fast ? TIVI_PIX_RGBA
+                       : (src->format == AV_PIX_FMT_P010LE ? TIVI_PIX_P010 : TIVI_PIX_NV12);
+
+        if (!p->hw_logged) {
+            p->hw_logged = true;
+            printf("video: %s decode, %s -> %s\n", p->hw_in_use ? "D3D11VA GPU" : "software (CPU)",
+                   av_get_pix_fmt_name(src->format) ? av_get_pix_fmt_name(src->format) : "?",
+                   fast ? "GPU shader convert" : "CPU sws convert");
+            fflush(stdout);
+        }
+
+        int idx = acquire_buf(p);
+        int64_t ptD = av_gettime_relative();
+        if (idx < 0) {                                // aborted (stop/seek/track switch)
+            av_frame_unref(frame);
+            if (src == p->hwsw) av_frame_unref(p->hwsw);
+            return;
+        }
+
+        if (fast) {
+            capture_color_info(p, src);
+            p->v_bitdepth = (tf == TIVI_PIX_P010) ? 10 : 8;
+            pack_planar(p, idx, src, tf == TIVI_PIX_P010 ? 2 : 1);
+            enqueue_buf(p, idx, pts, tf);
         } else {
-            M_lock(&p->lock); p->vfree[p->nfree++] = idx; M_unlock(&p->lock);
+            p->sws = sws_getCachedContext(p->sws, src->width, src->height, src->format,
+                                          p->vw, p->vh, AV_PIX_FMT_RGBA, SWS_BILINEAR, NULL, NULL, NULL);
+            if (p->sws) {
+                uint8_t *dst[4] = { p->vbuf[idx], NULL, NULL, NULL };
+                int dstst[4]    = { p->vw * 4, 0, 0, 0 };
+                sws_scale(p->sws, (const uint8_t * const *)src->data, src->linesize, 0, src->height, dst, dstst);
+                enqueue_buf(p, idx, pts, TIVI_PIX_RGBA);
+            } else {
+                M_lock(&p->lock); p->vfree[p->nfree++] = idx; M_unlock(&p->lock);
+            }
+        }
+        if (perf) {
+            int64_t ptE = av_gettime_relative();
+            if (s_n == 0) s_w0 = ptA;
+            s_recv += (ptB - ptA) / 1000.0; s_xfer += (ptC - ptB) / 1000.0;
+            s_wait += (ptD - ptC) / 1000.0; s_pack += (ptE - ptD) / 1000.0;
+            if (++s_n == 120) {
+                printf("[perf] dec: recv %.1f  xfer %.1f  wait %.1f  pack %.1f ms/f  (%.1f fps out)\n",
+                       s_recv / s_n, s_xfer / s_n, s_wait / s_n, s_pack / s_n, s_n / ((ptE - s_w0) / 1e6));
+                fflush(stdout);
+                s_recv = s_xfer = s_wait = s_pack = 0; s_n = 0;
+            }
         }
         av_frame_unref(frame);
+        if (src == p->hwsw) av_frame_unref(p->hwsw);
     }
 }
 
@@ -214,11 +367,18 @@ static void push_audio(Player *p, const float *buf, int frames) {
     while (off < frames) {
         M_lock(&p->lock);
         bool abort = p->stop || p->seek_req || p->req_audio != NO_REQ || p->req_sub != NO_REQ;
+        int vq = p->vqn;
         M_unlock(&p->lock);
         if (abort) return;
-        // keep at most ~0.5 s buffered so speed changes apply promptly (the ring
-        // itself holds 2.7 s — a full ring would lag the new tempo by that much)
-        if (audio_out_fill() > AO_RATE / 2) { msleep(4); continue; }
+        // Keep ~0.5 s of audio buffered so speed changes apply promptly — but never
+        // at the cost of starving video: many files (e.g. WEB-DL MKVs) interleave
+        // audio packets up to ~0.5 s AHEAD of the matching video packets, so pausing
+        // the demuxer on the audio cap would stall video decode until frames are
+        // already late (they then arrive in bursts and get dropped — slideshow).
+        // While the video queue is low, relax the cap to 2 s so the demuxer can
+        // reach the video packets; the ring (2.7 s) still bounds it.
+        int cap = (p->v_live && vq < VPOOL - 2) ? AO_RATE * 2 : AO_RATE / 2;
+        if (audio_out_fill() > cap) { msleep(4); continue; }
         int wr = audio_out_push(buf + off * 2, frames - off);
         off += wr;
         if (wr == 0) msleep(4);     // ring full — let the device drain
@@ -228,6 +388,17 @@ static void push_audio(Player *p, const float *buf, int frames) {
 static void decode_audio(Player *p, AVPacket *pkt, AVFrame *frame) {
     if (avcodec_send_packet(p->adec, pkt) < 0) return;
     while (avcodec_receive_frame(p->adec, frame) == 0) {
+        // Seek preroll: skip audio that ends before the seek target. Pushing it
+        // would rewind the master clock to the keyframe and replay old audio.
+        if (frame->pts != AV_NOPTS_VALUE && frame->sample_rate > 0) {
+            double sec = frame->pts * av_q2d(p->a_tb);
+            double dur = (double)frame->nb_samples / frame->sample_rate;
+            if (sec + dur < p->preroll_to) {
+                p->audio_pts_running = sec + dur;
+                av_frame_unref(frame);
+                continue;
+            }
+        }
         int out_count = (int)av_rescale_rnd(swr_get_delay(p->swr, p->swr_eff_rate) + frame->nb_samples,
                                             AO_RATE, p->swr_eff_rate, AV_ROUND_UP);
         if (out_count > p->swr_buf_frames) {
@@ -307,7 +478,17 @@ static void decode_sub(Player *p, AVPacket *pkt) {
 
 static void do_seek(Player *p, double target) {
     if (target < 0) target = 0;
+    {   // perf probe: log seek requests to diagnose landing position
+        static int perf = -1; if (perf < 0) perf = getenv("TIVI_PERF") ? 1 : 0;
+        if (perf) { printf("[perf] seek -> %.2f (from %.2f)\n", target, p->v_clock); fflush(stdout); }
+    }
     int64_t ts = (int64_t)(target * AV_TIME_BASE);
+    // Precise seek: av_seek_frame can only land on the keyframe AT/BEFORE the
+    // target (x265 WEB-DLs space keyframes 10 s+ apart, so a "+5 s" seek would
+    // otherwise snap BACK to the current GOP's keyframe). Decode from the
+    // keyframe but discard all output before `preroll_to`, so playback resumes
+    // exactly at the requested time. decode_video/decode_audio do the dropping.
+    p->preroll_to = target;
     av_seek_frame(p->fmt, -1, ts, AVSEEK_FLAG_BACKWARD);
     if (p->vdec) avcodec_flush_buffers(p->vdec);
     if (p->adec) avcodec_flush_buffers(p->adec);
@@ -399,7 +580,11 @@ static void decode_loop(Player *p) {
         double spd = p->speed;
         if (p->adec && p->swr && spd != p->swr_speed) init_swr(p, p->adec, spd);
 
+        static int perf = -1; if (perf < 0) perf = getenv("TIVI_PERF") ? 1 : 0;
+        static double lp_read, lp_aud, lp_vid, lp_sub; static int64_t lp_w0;
+        int64_t lt0 = perf ? av_gettime_relative() : 0;
         int r = av_read_frame(p->fmt, pkt);
+        int64_t lt1 = perf ? av_gettime_relative() : 0;
         if (r < 0) {
             if (p->vdec) decode_video(p, NULL, frame);     // flush
             if (p->adec) decode_audio(p, NULL, frame);
@@ -412,6 +597,21 @@ static void decode_loop(Player *p) {
         if      (pkt->stream_index == p->v_stream && p->vdec) decode_video(p, pkt, frame);
         else if (pkt->stream_index == p->a_stream && p->adec) decode_audio(p, pkt, frame);
         else if (pkt->stream_index == p->s_stream && p->sdec) decode_sub(p, pkt);
+        if (perf) {
+            int64_t lt2 = av_gettime_relative();
+            double ms = (lt2 - lt1) / 1000.0;
+            lp_read += (lt1 - lt0) / 1000.0;
+            if      (pkt->stream_index == p->v_stream) lp_vid += ms;
+            else if (pkt->stream_index == p->a_stream) lp_aud += ms;
+            else                                       lp_sub += ms;
+            if (!lp_w0) lp_w0 = lt0;
+            if (lt2 - lp_w0 >= 2000000) {
+                printf("[perf] loop2s: read %.0f  audio %.0f  video %.0f  sub %.0f ms  afill %d\n",
+                       lp_read, lp_aud, lp_vid, lp_sub, audio_out_fill());
+                fflush(stdout);
+                lp_read = lp_aud = lp_vid = lp_sub = 0; lp_w0 = lt2;
+            }
+        }
         av_packet_unref(pkt);
     }
     av_packet_free(&pkt);
@@ -434,6 +634,8 @@ Player *player_create(void) {
     p->req_audio = p->req_sub = NO_REQ;
     p->disp_buf = -1;
     p->volume = 1.0f; p->speed = 1.0;
+    p->want_hw = true; p->want_gpu_convert = true;   // settings override before player_open
+    p->disp_fmt = TIVI_PIX_RGBA;
     return p;
 }
 
@@ -498,6 +700,7 @@ bool player_open(Player *p, const char *path) {
         p->vdec = open_stream_decoder(p, vs);
         if (p->vdec) {
             p->v_stream = vs; p->v_tb = p->fmt->streams[vs]->time_base;
+            p->v_live = !(p->fmt->streams[vs]->disposition & AV_DISPOSITION_ATTACHED_PIC);
             p->vw = p->vdec->width; p->vh = p->vdec->height;
             if (p->vw <= 0 || p->vh <= 0) { p->vw = 1280; p->vh = 720; }
             AVRational fr = p->fmt->streams[vs]->avg_frame_rate;
@@ -542,9 +745,15 @@ void player_close(Player *p) {
 #endif
         p->thread_running = false;
     }
-    if (p->vdec) avcodec_free_context(&p->vdec);
+    if (p->vdec) avcodec_free_context(&p->vdec);   // releases the decoder's device ref
     if (p->adec) avcodec_free_context(&p->adec);
     if (p->sdec) avcodec_free_context(&p->sdec);
+    if (p->hwsw) av_frame_free(&p->hwsw);
+    if (p->hw_device_ctx) av_buffer_unref(&p->hw_device_ctx);
+    p->hw_pix_fmt = AV_PIX_FMT_NONE; p->hw_logged = false; p->hw_in_use = false;
+    p->disp_fmt = TIVI_PIX_RGBA; p->v_bitdepth = 8; p->v_colorspace = 1; p->v_range = 0;
+    if (p->snap_sws) { sws_freeContext(p->snap_sws); p->snap_sws = NULL; }
+    free(p->snap_rgba); p->snap_rgba = NULL;
     if (p->sws)  { sws_freeContext(p->sws); p->sws = NULL; }
     if (p->swr)  swr_free(&p->swr);
     if (p->fmt)  avformat_close_input(&p->fmt);
@@ -554,7 +763,7 @@ void player_close(Player *p) {
     free(p->sub_header); p->sub_header = NULL; p->sub_header_size = 0;
     free(p->swr_buf); p->swr_buf = NULL; p->swr_buf_frames = 0;
     p->v_stream = p->a_stream = p->s_stream = -1;
-    p->has_video = p->has_audio = false;
+    p->has_video = p->has_audio = false; p->v_live = false; p->preroll_to = 0;
     p->ntracks = 0; p->opened = false; p->stop = false;
     p->title[0] = 0;
 }
@@ -587,10 +796,28 @@ void player_update(Player *p, double dt) {
     else if (p->playing)      { p->v_clock += dt * p->speed; if (p->v_clock < 0) p->v_clock = 0; }
     double master = p->v_clock;
 
+    int adv = 0;
     while (p->vqn > 0 && p->vq[p->vqh].pts <= master) {
         if (p->disp_buf >= 0) p->vfree[p->nfree++] = p->disp_buf;
-        p->disp_buf = p->vq[p->vqh].buf; p->disp_pts = p->vq[p->vqh].pts;
+        p->disp_buf = p->vq[p->vqh].buf; p->disp_pts = p->vq[p->vqh].pts; p->disp_fmt = p->vq[p->vqh].fmt;
         p->vqh = (p->vqh + 1) % VPOOL; p->vqn--; p->display_dirty = true;
+        adv++;
+    }
+    {   // perf probe (TIVI_PERF=1): pacing behavior — how frames leave the queue
+        static int perf = -1; if (perf < 0) perf = getenv("TIVI_PERF") ? 1 : 0;
+        if (perf) {
+            static int ev, fr, multi, ticks, qsum; static int64_t w0;
+            int64_t t = av_gettime_relative();
+            if (!w0) w0 = t;
+            ticks++; qsum += p->vqn;
+            if (adv) { ev++; fr += adv; if (adv > 1) multi++; }
+            if (t - w0 >= 2000000) {
+                printf("[perf] pace: %d events, %d frames (%.2f fr/ev), %d multi, avg queue %.1f  master %.2f\n",
+                       ev, fr, ev ? (double)fr / ev : 0.0, multi, ticks ? (double)qsum / ticks : 0.0, master);
+                fflush(stdout);
+                w0 = t; ev = fr = multi = ticks = qsum = 0;
+            }
+        }
     }
     bool audio_drained = !p->has_audio || audio_out_fill() == 0;
     p->reached_eof = p->demux_eof && p->vqn == 0 && audio_drained;
@@ -637,14 +864,62 @@ int  player_video_width(const Player *p)  { return p->vw; }
 int  player_video_height(const Player *p) { return p->vh; }
 double player_fps(const Player *p) { return p->fps; }
 
-bool player_frame(Player *p, uint8_t **rgba, int *w, int *h, bool *changed) {
+bool player_frame(Player *p, TiviFrame *out, bool *changed) {
     M_lock(&p->lock);
     if (p->disp_buf < 0) { if (changed) *changed = false; M_unlock(&p->lock); return false; }
-    *rgba = p->vbuf[p->disp_buf]; *w = p->vw; *h = p->vh;
+    uint8_t *buf = p->vbuf[p->disp_buf];
+    TiviPixFmt f = p->disp_fmt;
+    out->fmt = f; out->w = p->vw; out->h = p->vh;
+    out->colorspace = p->v_colorspace; out->full_range = p->v_range;
+    if (f == TIVI_PIX_RGBA) {
+        out->plane[0] = buf; out->stride[0] = p->vw * 4;
+        out->plane[1] = NULL; out->stride[1] = 0;
+        out->bitdepth = 8;
+    } else {
+        int bytes = (f == TIVI_PIX_P010) ? 2 : 1;
+        int cw = (p->vw + 1) / 2;
+        out->plane[0] = buf;                                 out->stride[0] = p->vw * bytes;
+        out->plane[1] = buf + (size_t)p->vw * bytes * p->vh; out->stride[1] = cw * 2 * bytes;
+        out->bitdepth = (f == TIVI_PIX_P010) ? 10 : 8;
+    }
     if (changed) *changed = p->display_dirty;
     p->display_dirty = false;
     M_unlock(&p->lock);
     return true;
+}
+
+bool player_snapshot_rgba(Player *p, uint8_t **rgba, int *w, int *h) {
+    M_lock(&p->lock);
+    int idx = p->disp_buf; TiviPixFmt f = p->disp_fmt; int vw = p->vw, vh = p->vh;
+    M_unlock(&p->lock);
+    if (idx < 0) return false;
+    uint8_t *buf = p->vbuf[idx];
+    if (f == TIVI_PIX_RGBA) { *rgba = buf; *w = vw; *h = vh; return true; }
+    // Planar display frame — convert to RGBA on demand into the snapshot scratch.
+    if (!p->snap_rgba) { p->snap_rgba = (uint8_t *)malloc((size_t)vw * vh * 4); if (!p->snap_rgba) return false; }
+    int bytes = (f == TIVI_PIX_P010) ? 2 : 1, cw = (vw + 1) / 2;
+    enum AVPixelFormat inf = (f == TIVI_PIX_P010) ? AV_PIX_FMT_P010LE : AV_PIX_FMT_NV12;
+    const uint8_t *sd[4] = { buf, buf + (size_t)vw * bytes * vh, NULL, NULL };
+    int sst[4] = { vw * bytes, cw * 2 * bytes, 0, 0 };
+    p->snap_sws = sws_getCachedContext(p->snap_sws, vw, vh, inf, vw, vh, AV_PIX_FMT_RGBA, SWS_BILINEAR, NULL, NULL, NULL);
+    if (!p->snap_sws) return false;
+    uint8_t *dst[4] = { p->snap_rgba, NULL, NULL, NULL };
+    int dstst[4] = { vw * 4, 0, 0, 0 };
+    sws_scale(p->snap_sws, sd, sst, 0, vh, dst, dstst);
+    *rgba = p->snap_rgba; *w = vw; *h = vh;
+    return true;
+}
+
+void player_set_hw_decode(Player *p, bool on)   { p->want_hw = on; }
+void player_set_gpu_convert(Player *p, bool on) { M_lock(&p->lock); p->want_gpu_convert = on; M_unlock(&p->lock); }
+bool player_hw_active(const Player *p)          { return p->hw_in_use; }
+const char *player_decode_desc(const Player *p) { return p->hw_in_use ? "D3D11VA" : "software"; }
+const char *player_convert_desc(const Player *p) {
+    switch (p->disp_fmt) {
+        case TIVI_PIX_P010: return "GPU shader (p010)";
+        case TIVI_PIX_NV12: return "GPU shader (nv12)";
+        default:            return "CPU (sws)";
+    }
 }
 
 int player_track_count(const Player *p) { return p->ntracks; }

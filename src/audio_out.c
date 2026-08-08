@@ -27,6 +27,8 @@ static struct {
     atomic_bool have_pts;
     volatile float volume;
     volatile double speed;       // media-seconds per output-second (1 = normal)
+
+    atomic_uint cb_count, cb_max;   // perf probe: callback invocations / max chunk
 } A;
 
 static unsigned ao_fill_frames(void) {
@@ -49,6 +51,14 @@ static void ao_callback(void *buffer, unsigned int frames) {
     }
     atomic_store_explicit(&A.rd, rd, memory_order_release);
     for (unsigned i = n; i < frames; i++) { out[i * 2] = 0.0f; out[i * 2 + 1] = 0.0f; }  // underrun → silence
+    atomic_fetch_add(&A.cb_count, 1);
+    unsigned prev = atomic_load(&A.cb_max);
+    while (frames > prev && !atomic_compare_exchange_weak(&A.cb_max, &prev, frames)) {}
+}
+
+void audio_out_perf(unsigned *callbacks, unsigned *max_chunk) {
+    if (callbacks) *callbacks = atomic_exchange(&A.cb_count, 0);
+    if (max_chunk) *max_chunk = atomic_exchange(&A.cb_max, 0);
 }
 
 bool audio_out_init(void) {

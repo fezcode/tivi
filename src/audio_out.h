@@ -32,4 +32,8 @@ void   audio_out_set_volume(float v);            // 0..1
 void   audio_out_set_paused(bool paused);
 bool   audio_out_ready(void);
 
+// Perf probe: callback invocations + largest callback chunk (frames) since the
+// last call (counters reset on read). Used by the TIVI_PERF overlay.
+void   audio_out_perf(unsigned *callbacks, unsigned *max_chunk);
+
 #endif

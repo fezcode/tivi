@@ -44,4 +44,20 @@ bool  subs_render(Subs *s, long long now_ms, uint8_t **rgba, int *w, int *h, boo
 void  subs_clear(Subs *s);     // drop the current track
 bool  subs_has_track(const Subs *s);
 
+// ---- font styling (applied to plain-text subs only; ASS/SSA keep their own) ----
+typedef struct {
+    const char *font;        // family name (NULL/"" = default sans-serif)
+    float    scale;          // size multiplier (1.0 = default)
+    unsigned color;          // 0xRRGGBB fill
+    unsigned outline_color;  // 0xRRGGBB border
+    float    outline;        // outline width in px
+    float    shadow;         // drop-shadow depth in px
+} SubStyle;
+
+// Set the user font style; applied live to plain-text tracks (see subs_set_plaintext).
+void  subs_set_style(Subs *s, const SubStyle *st);
+// Mark whether the current track is plain-text (apply the style) or authored
+// ASS/SSA (leave styling untouched). Call whenever the track changes.
+void  subs_set_plaintext(Subs *s, bool plaintext);
+
 #endif

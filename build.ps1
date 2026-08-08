@@ -23,7 +23,7 @@ $flags   = @('-O2','-Wall','-Wextra','-Wno-unused-parameter','-std=c11','-Isrc')
 $winlibs = '-mwindows','-lopengl32','-lgdi32','-lwinmm','-lcomdlg32','-lole32','-loleaut32','-luser32','-ldwmapi','-lshell32','-lm'
 
 New-Item -ItemType Directory -Force -Path build | Out-Null
-$srcs = 'main','player','audio_out','subs','playlist','mediakeys','singleinst','osvideo','viconfig'
+$srcs = 'main','player','audio_out','subs','playlist','mediakeys','singleinst','osvideo','viconfig','yuvtex'
 
 # Incremental: any .h change invalidates every .o (avoids stale-struct corruption).
 $headers = Get-ChildItem src\*.h -ErrorAction SilentlyContinue
