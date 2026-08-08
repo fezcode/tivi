@@ -22,7 +22,7 @@
 #include <string.h>
 #include <time.h>
 
-#define TIVI_VERSION "0.1.0"
+#define TIVI_VERSION "0.1.1"
 #define SS 2                 // supersample factor — the whole UI is rendered at
                              // SS× and downscaled with bilinear, for smooth AA on
                              // every shape, icon, and glyph (as in Timp).
@@ -577,8 +577,11 @@ int main(int argc, char **argv) {
 
     g_last_activity = GetTime();
     Vector2 lastMouse = GetMousePosition();
-    double last_click_t = -1; int shot_frame = getenv("TIVI_SHOT") ? 120 : -1, frame = 0;
-    if (shot_frame > 0) { g_panel = PANEL_SETTINGS;   // dev hook: screenshot the settings UI
+    double last_click_t = -1; int shot_frame = -1, frame = 0;
+    if (getenv("TIVI_SHOT")) {                        // dev hook: screenshot the UI
+        int sf = atoi(getenv("TIVI_SHOT"));           // TIVI_SHOT=<frame> picks the moment; else ~2s in
+        shot_frame = (sf > 1) ? sf : 120;
+        if (!getenv("TIVI_SHOT_PLAIN")) g_panel = PANEL_SETTINGS;   // PLAIN=1 → playback view, no panel
         if (getenv("TIVI_SHOT_SCROLL")) g_set_scroll = (float)atoi(getenv("TIVI_SHOT_SCROLL")); }
 
     // Supersampled render target: the whole UI is drawn at SS× then downscaled with
@@ -911,8 +914,12 @@ int main(int argc, char **argv) {
                 SetShaderValue(adjShader, locC1, &g_yuv_xfm.c1, SHADER_UNIFORM_VEC3);
                 SetShaderValue(adjShader, locC2, &g_yuv_xfm.c2, SHADER_UNIFORM_VEC3);
                 SetShaderValue(adjShader, locYoff, &g_yuv_xfm.off, SHADER_UNIFORM_VEC3);
-                SetShaderValueTexture(adjShader, locTexUV, g_yuv.uv);
                 BeginShaderMode(adjShader);
+                // Must be inside Begin/EndShaderMode: the sampler registers in the
+                // render batch's texture slots, and any batch flush (e.g. the shader
+                // switch in BeginShaderMode) resets them — binding before the switch
+                // leaves the UV unit empty and the picture green.
+                SetShaderValueTexture(adjShader, locTexUV, g_yuv.uv);
                 DrawTexturePro(g_yuv.y, (Rectangle){ 0, 0, (float)g_yuv.w, (float)g_yuv.h }, vr, (Vector2){ 0, 0 }, 0, WHITE);
                 EndShaderMode();
             } else if (vtex_valid) {
@@ -1476,6 +1483,7 @@ int main(int argc, char **argv) {
         EndDrawing();
 
         frame++;
+        if (shot_frame > 0) g_last_activity = GetTime();   // keep controls visible for the shot
         if (shot_frame > 0 && frame == shot_frame) TakeScreenshot("tivi_shot.png");
         if (shot_frame > 0 && frame == shot_frame + 3) break;
         // dev hook: scripted relative seeks (+5, +5, -5) to test seek precision headlessly

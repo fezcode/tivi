@@ -1,10 +1,10 @@
-[app]
+﻿[app]
 name    = "tivi"
-version = "0.1.0"
+version = "0.1.1"
 id      = "io.tivi.tivi"
 
 [meta]
-publisher = "Şamil Bülbül (Fezcode)"
+publisher = "Åamil BÃ¼lbÃ¼l (Fezcode)"
 comments  = "Native, resizable video player"
 
 [ui]
@@ -15,14 +15,14 @@ window_title = "tivi Setup"
 default_dir = "${PROGRAMFILES}/tivi"
 
 # Settings live in %APPDATA%\tivi (outside the install dir), so uninstall
-# never touches them — nothing to keep here.
+# never touches them â€” nothing to keep here.
 [uninstall]
 keep = []
 
 [[steps]]
 type  = "welcome"
-title = "tivi 0.1.0"
-body  = "This wizard will install tivi 0.1.0 on your computer.\n\ntivi is a small, native, resizable video player (FFmpeg-powered, Timp-styled).\n\nClick Next to continue."
+title = "tivi 0.1.1"
+body  = "This wizard will install tivi 0.1.1 on your computer.\n\ntivi is a small, native, resizable video player (FFmpeg-powered, Timp-styled).\n\nClick Next to continue."
 
 [[steps]]
 type  = "license"
@@ -33,7 +33,7 @@ file  = "LICENSE.txt"
 [[steps]]
 type  = "folder"
 title = "Select Folder"
-body  = "Choose where to install tivi 0.1.0."
+body  = "Choose where to install tivi 0.1.1."
 
 [[steps]]
 type  = "shortcuts"
@@ -56,7 +56,7 @@ target  = "${INSTALLDIR}/tivi.exe"
 label   = "Run tivi after install"
 checked = true
 
-# Application payload — staged by installer.ps1 (tivi.exe + bundled runtime DLLs).
+# Application payload â€” staged by installer.ps1 (tivi.exe + bundled runtime DLLs).
 [[dirs]]
 src = "dist/win-x64"
 dst = "${INSTALLDIR}"
@@ -89,4 +89,4 @@ data  = "${INSTALLDIR}"
 hive  = "HKLM"
 key   = "Software\\tivi\\tivi"
 value = "Version"
-data  = "0.1.0"
+data  = "0.1.1"
