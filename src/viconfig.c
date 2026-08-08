@@ -8,7 +8,26 @@
 #include <windows.h>
 #endif
 
-static void cfg_path(char *out, int cap) {
+// Portable-first config location: config.ini NEXT TO THE EXECUTABLE whenever the
+// exe directory is usable (dev build, bundle, portable copies). Installs under
+// Program Files are not user-writable, so those fall back to %APPDATA%\tivi.
+// Load prefers an existing exe-dir file, then %APPDATA% (migration path: first
+// save next to a writable exe adopts the portable location from then on).
+
+static void exe_cfg_path(char *out, int cap) {
+    out[0] = 0;
+#ifdef _WIN32
+    char exe[520] = { 0 };
+    DWORD n = GetModuleFileNameA(NULL, exe, sizeof(exe));
+    if (n > 0 && n < sizeof(exe) - 12) {
+        char *sl = NULL;
+        for (char *p = exe; *p; p++) if (*p == '\\' || *p == '/') sl = p;
+        if (sl) { *sl = 0; snprintf(out, cap, "%s\\config.ini", exe); }
+    }
+#endif
+}
+
+static void appdata_cfg_path(char *out, int cap) {
 #ifdef _WIN32
     const char *appdata = getenv("APPDATA");
     if (appdata && *appdata) {
@@ -23,6 +42,15 @@ static void cfg_path(char *out, int cap) {
 #endif
 }
 
+static void cfg_path(char *out, int cap) {   // load: exe-dir file wins if it exists
+    exe_cfg_path(out, cap);
+    if (out[0]) {
+        FILE *f = fopen(out, "r");
+        if (f) { fclose(f); return; }
+    }
+    appdata_cfg_path(out, cap);
+}
+
 void viconfig_defaults(ViConfig *c) {
     memset(c, 0, sizeof(*c));
     c->volume = 0.85f;
@@ -31,6 +59,7 @@ void viconfig_defaults(ViConfig *c) {
     c->letterbox_black = true;   // black bars look right for video by default
     c->click_pause = true;
     c->auto_queue = true;
+    c->pin_controls = false;
     c->theme = 0;
     c->brightness = 0.0f;
     c->contrast   = 1.0f;
@@ -73,6 +102,7 @@ bool viconfig_load(ViConfig *c) {
             else if (!strcmp(key, "letterbox_black"))   c->letterbox_black = iv != 0;
             else if (!strcmp(key, "click_pause"))       c->click_pause = iv != 0;
             else if (!strcmp(key, "auto_queue"))        c->auto_queue = iv != 0;
+            else if (!strcmp(key, "pin_controls"))      c->pin_controls = iv != 0;
             else if (!strcmp(key, "theme"))             c->theme = iv;
             else if (!strcmp(key, "hw_decode"))         c->hw_decode = iv != 0;
             else if (!strcmp(key, "gpu_convert"))       c->gpu_convert = iv != 0;
@@ -94,8 +124,9 @@ bool viconfig_load(ViConfig *c) {
 }
 
 bool viconfig_save(const ViConfig *c) {
-    char path[600]; cfg_path(path, sizeof(path));
-    FILE *f = fopen(path, "w");
+    char path[600]; exe_cfg_path(path, sizeof(path));
+    FILE *f = path[0] ? fopen(path, "w") : NULL;   // portable first…
+    if (!f) { appdata_cfg_path(path, sizeof(path)); f = fopen(path, "w"); }   // …%APPDATA% fallback
     if (!f) return false;
     fprintf(f, "# tivi settings\n");
     fprintf(f, "volume=%.3f\n", c->volume);
@@ -104,6 +135,7 @@ bool viconfig_save(const ViConfig *c) {
     fprintf(f, "letterbox_black=%d\n", c->letterbox_black ? 1 : 0);
     fprintf(f, "click_pause=%d\n", c->click_pause ? 1 : 0);
     fprintf(f, "auto_queue=%d\n", c->auto_queue ? 1 : 0);
+    fprintf(f, "pin_controls=%d\n", c->pin_controls ? 1 : 0);
     fprintf(f, "theme=%d\n", c->theme);
     fprintf(f, "brightness=%.3f\n", c->brightness);
     fprintf(f, "contrast=%.3f\n",   c->contrast);

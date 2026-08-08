@@ -10,6 +10,7 @@
 #include <commdlg.h>
 #include <dwmapi.h>
 #include <shellapi.h>
+#include <shlobj.h>
 
 static char *w_to_utf8(const wchar_t *w) {
     int n = WideCharToMultiByte(CP_UTF8, 0, w, -1, NULL, 0, NULL, NULL);
@@ -199,6 +200,16 @@ void os_native_maximize_toggle(void *hwnd) {
     ShowWindow(h, IsZoomed(h) ? SW_RESTORE : SW_MAXIMIZE);
 }
 
+bool os_desktop_dir(char *out, int cap) {
+    wchar_t w[MAX_PATH] = { 0 };
+    if (SHGetFolderPathW(NULL, CSIDL_DESKTOPDIRECTORY, NULL, SHGFP_TYPE_CURRENT, w) != S_OK) return false;
+    char *u = w_to_utf8(w);
+    if (!u) return false;
+    snprintf(out, cap, "%s", u);
+    free(u);
+    return true;
+}
+
 int os_scan_dir_files(const char *utf8dir, void (*on_file)(const char *utf8_path, void *ud), void *ud) {
     wchar_t wdir[4096], pat[4096];
     if (!MultiByteToWideChar(CP_UTF8, 0, utf8dir, -1, wdir, 4096)) return 0;
@@ -233,4 +244,5 @@ void os_snap_set_enabled(bool on) { (void)on; }
 bool os_is_zoomed(void *hwnd) { (void)hwnd; return false; }
 void os_native_maximize_toggle(void *hwnd) { (void)hwnd; }
 int  os_scan_dir_files(const char *utf8dir, void (*on_file)(const char *utf8_path, void *ud), void *ud) { (void)utf8dir;(void)on_file;(void)ud; return 0; }
+bool os_desktop_dir(char *out, int cap) { (void)out;(void)cap; return false; }
 #endif

@@ -49,7 +49,7 @@ subtitles, video adjustments, and track switching, wrapped in a borderless, flui
 - 🔊 **Volume boost** — VLC-style software amplification up to **200%** for quiet media, with a
   100% notch on the slider.
 - 🪟 **Native feel** — borderless resizable window (drag any edge), aero snap, Win11 rounded
-  corners + shadow, fullscreen, always-on-top, letterboxed fluid layout.
+  corners + shadow, fullscreen, always-on-top, letterboxed fluid layout, pinnable control bar.
 - 🎚️ **Transport** — play/pause, drag-to-seek, ±5 s / ±10 s, volume, mute, playback speed
   (0.25–2×), 3-state repeat, shuffle, playlist with drag-and-drop enqueue.
 - 🔊 **Proper A/V sync** — audio-master clock, background decode thread, late-frame scheduling.
@@ -66,7 +66,8 @@ Grab **`tivi-Setup-<version>.exe`** from the [latest release](https://github.com
 and run it — fully self-contained (FFmpeg, libass and raylib bundled), registers in
 Add/Remove Programs, ships its own uninstaller. Silent install: `Setup.exe /S`.
 
-Settings live in `%APPDATA%\tivi` and survive uninstall.
+Settings are **portable** — `config.ini` lives next to `tivi.exe` whenever that folder is
+writable, falling back to `%APPDATA%\tivi` (Program Files installs). They survive uninstall.
 
 ## 🚀 Usage
 
@@ -115,9 +116,11 @@ pacman -S mingw-w64-x86_64-gcc mingw-w64-x86_64-pkgconf `
 
 ## ⚙️ Configuration
 
-`config.ini` lives in `%APPDATA%\tivi\`. Persisted: volume, always-on-top, theme, subtitle
-settings (font, size, colors, outline, shadow), hardware decode / GPU conversion toggles, the
-five video adjustments, and window geometry.
+`config.ini` sits **next to `tivi.exe`** when that folder is writable (portable style), else in
+`%APPDATA%\tivi\`. Settings **autosave as you change them** — a crash or kill can't lose them.
+Persisted: volume, always-on-top, theme, subtitle settings (font, size, colors, outline, shadow),
+hardware decode / GPU conversion toggles, auto-queue, pinned controls, the five video
+adjustments, and window geometry. Snapshots (`S`) are saved to the **Desktop**.
 
 ## 💻 Command line
 

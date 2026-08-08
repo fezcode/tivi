@@ -526,8 +526,13 @@ static void snapshot(void) {
     uint8_t *rgba; int w, h;
     if (!player_snapshot_rgba(P, &rgba, &w, &h)) { osd("No frame to snapshot"); return; }
     Image im = { rgba, w, h, 1, PIXELFORMAT_UNCOMPRESSED_R8G8B8A8 };
-    char name[256]; snprintf(name, sizeof(name), "tivi_snapshot_%ld.png", (long)time(NULL));
-    if (ExportImage(im, name)) osd("Saved %s", name); else osd("Snapshot failed");
+    char base[64]; snprintf(base, sizeof(base), "tivi_snapshot_%ld.png", (long)time(NULL));
+    char dir[520], name[600];
+    if (os_desktop_dir(dir, sizeof dir)) snprintf(name, sizeof(name), "%s\\%s", dir, base);
+    else snprintf(name, sizeof(name), "%s", base);
+    if (ExportImage(im, name)) osd("Saved to Desktop  %s", base);
+    else if (ExportImage(im, base)) osd("Saved %s", base);   // Desktop failed (exotic path) → cwd
+    else osd("Snapshot failed");
 }
 
 // Manual borderless fullscreen: just resize the (already borderless) window to
@@ -813,7 +818,7 @@ int main(int argc, char **argv) {
         if (moved || GetMouseWheelMove() != 0 || GetKeyPressed() != 0 || IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) g_last_activity = now;
         lastMouse = mp;
         bool force_show = !playing || g_panel != PANEL_NONE || !open || !player_has_video(P);
-        bool show = force_show || (now - g_last_activity) < 2.6;
+        bool show = force_show || CFG.pin_controls || g_menu_open || (now - g_last_activity) < 2.6;
         g_ctrl = approach(g_ctrl, show ? 1.0f : 0.0f, (float)dt);
         bool ctl = g_ctrl > 0.35f;                  // controls accept input
         if (player_has_video(P) && playing && g_ctrl < 0.05f) HideCursor(); else ShowCursor();
@@ -1430,9 +1435,9 @@ int main(int argc, char **argv) {
                 float yy = viewTop + 6 - g_set_scroll;
 
                 // toggles
-                const char *labels[5] = { "Always on top", "Black letterbox", "Shuffle", "Click video to pause", "Auto-queue folder" };
-                bool st[5] = { g_aot, g_letterbox_black, playlist_shuffle(&PL), g_click_pause, CFG.auto_queue };
-                for (int i = 0; i < 5; i++) {
+                const char *labels[6] = { "Always on top", "Black letterbox", "Shuffle", "Click video to pause", "Auto-queue folder", "Pin controls" };
+                bool st[6] = { g_aot, g_letterbox_black, playlist_shuffle(&PL), g_click_pause, CFG.auto_queue, CFG.pin_controls };
+                for (int i = 0; i < 6; i++) {
                     Rectangle row = { px - 6, yy - 6, iw + 12, 46 };
                     bool hov = inview && CheckCollisionPointRec(mp, row);
                     if (hov) DrawRectangleRounded(row, 0.3f, 6, alpha(WHITE, 10));
@@ -1445,7 +1450,8 @@ int main(int argc, char **argv) {
                         else if (i == 1) g_letterbox_black = !g_letterbox_black;
                         else if (i == 2) playlist_set_shuffle(&PL, !playlist_shuffle(&PL));
                         else if (i == 3) g_click_pause = !g_click_pause;
-                        else { CFG.auto_queue = !CFG.auto_queue; osd("Auto-queue folder %s", CFG.auto_queue ? "on" : "off"); }
+                        else if (i == 4) { CFG.auto_queue = !CFG.auto_queue; osd("Auto-queue folder %s", CFG.auto_queue ? "on" : "off"); }
+                        else { CFG.pin_controls = !CFG.pin_controls; osd(CFG.pin_controls ? "Controls pinned" : "Controls auto-hide"); }
                         consumed = true;
                     }
                     yy += 50;
@@ -1725,6 +1731,22 @@ int main(int argc, char **argv) {
                        (Rectangle){ 0, 0, (float)W, (float)H }, (Vector2){ 0, 0 }, 0, WHITE);
         EndDrawing();
 
+        // ---- autosave settings ----
+        // Persist on change (checked every 2 s), not only at exit — a kill, crash or
+        // power cut used to lose the whole session's settings (e.g. subtitle size).
+        // Window geometry stays exit-only; mid-session moves shouldn't thrash the file.
+        {
+            static double last_check = 0; static ViConfig snap; static bool snap_ok = false;
+            if (now - last_check > 2.0) {
+                last_check = now;
+                ViConfig cur = CFG;
+                cur.volume = g_volume; cur.always_on_top = g_aot; cur.subtitles_enabled = g_subs_on;
+                cur.letterbox_black = g_letterbox_black; cur.click_pause = g_click_pause; cur.theme = g_theme;
+                if (!snap_ok) { snap = cur; snap_ok = true; }
+                else if (memcmp(&cur, &snap, sizeof cur) != 0) { viconfig_save(&cur); snap = cur; }
+            }
+        }
+
         frame++;
         if (shot_frame > 0) g_last_activity = GetTime();   // keep controls visible for the shot
         if (shot_frame > 0 && frame == shot_frame) TakeScreenshot("tivi_shot.png");
@@ -1772,14 +1794,20 @@ int main(int argc, char **argv) {
     else if (!g_maximized && !os_is_zoomed(GetWindowHandle())) { Vector2 wp = GetWindowPosition(); CFG.win_x = (int)wp.x; CFG.win_y = (int)wp.y; CFG.win_w = GetScreenWidth(); CFG.win_h = GetScreenHeight(); CFG.has_win = true; }
     viconfig_save(&CFG);
 
-    player_destroy(P);
-    subs_destroy(SUB);
-    destroy_textures();
-    yuvtex_destroy(&g_yuv);
-    UnloadShader(adjShader);
-    audio_out_shutdown();
-    CloseAudioDevice();
-    CloseWindow();
-    playlist_free(&PL);
+    // TIVI_PERF: shutdown stage markers — the exit path has been seen hanging
+    // (zombie process, decode threads spinning); this pinpoints the stage.
+    int pf = getenv("TIVI_PERF") != NULL;
+#define XSTAGE(name) do { if (pf) { printf("[perf] exit: " name "\n"); fflush(stdout); } } while (0)
+    XSTAGE("player_destroy");   player_destroy(P);
+    XSTAGE("subs_destroy");     subs_destroy(SUB);
+    XSTAGE("textures");         destroy_textures();
+    XSTAGE("yuvtex");           yuvtex_destroy(&g_yuv);
+    XSTAGE("shader");           UnloadShader(adjShader);
+    XSTAGE("audio_shutdown");   audio_out_shutdown();
+    XSTAGE("close_audio");      CloseAudioDevice();
+    XSTAGE("close_window");     CloseWindow();
+    XSTAGE("playlist");         playlist_free(&PL);
+    XSTAGE("done");
+#undef XSTAGE
     return 0;
 }

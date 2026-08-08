@@ -48,6 +48,10 @@ void os_native_maximize_toggle(void *hwnd);
 // 0 on error. Windows-only; a stub elsewhere.
 int os_scan_dir_files(const char *utf8dir, void (*on_file)(const char *utf8_path, void *ud), void *ud);
 
+// The user's Desktop directory (UTF-8, no trailing slash). False off Windows or
+// on failure. Used as the snapshot save location.
+bool os_desktop_dir(char *out, int cap);
+
 // Attach a GUI-subsystem (-mwindows) process to the parent console so that
 // printf from CLI modes (-h / -v / --probe) is visible in the terminal.
 void os_console_attach(void);

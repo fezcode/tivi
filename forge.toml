@@ -1,10 +1,11 @@
-﻿[app]
+[app]
 name    = "tivi"
 version = "0.2.0"
 id      = "io.tivi.tivi"
+icon    = "assets/tivi.ico"
 
 [meta]
-publisher = "Åamil BÃ¼lbÃ¼l (Fezcode)"
+publisher = "Şamil Bülbül (Fezcode)"
 comments  = "Native, resizable video player"
 
 [ui]
@@ -14,10 +15,10 @@ window_title = "tivi Setup"
 [install]
 default_dir = "${PROGRAMFILES}/tivi"
 
-# Settings live in %APPDATA%\tivi (outside the install dir), so uninstall
-# never touches them â€” nothing to keep here.
+# Settings are portable (config.ini next to the exe) when the install dir is
+# writable, falling back to %APPDATA%\tivi. Keep the portable file on uninstall.
 [uninstall]
-keep = []
+keep = ["config.ini"]
 
 [[steps]]
 type  = "welcome"
