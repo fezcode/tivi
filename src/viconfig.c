@@ -30,6 +30,7 @@ void viconfig_defaults(ViConfig *c) {
     c->subtitles_enabled = true;
     c->letterbox_black = true;   // black bars look right for video by default
     c->click_pause = true;
+    c->auto_queue = true;
     c->theme = 0;
     c->brightness = 0.0f;
     c->contrast   = 1.0f;
@@ -71,6 +72,7 @@ bool viconfig_load(ViConfig *c) {
             else if (!strcmp(key, "subtitles_enabled")) c->subtitles_enabled = iv != 0;
             else if (!strcmp(key, "letterbox_black"))   c->letterbox_black = iv != 0;
             else if (!strcmp(key, "click_pause"))       c->click_pause = iv != 0;
+            else if (!strcmp(key, "auto_queue"))        c->auto_queue = iv != 0;
             else if (!strcmp(key, "theme"))             c->theme = iv;
             else if (!strcmp(key, "hw_decode"))         c->hw_decode = iv != 0;
             else if (!strcmp(key, "gpu_convert"))       c->gpu_convert = iv != 0;
@@ -101,6 +103,7 @@ bool viconfig_save(const ViConfig *c) {
     fprintf(f, "subtitles_enabled=%d\n", c->subtitles_enabled ? 1 : 0);
     fprintf(f, "letterbox_black=%d\n", c->letterbox_black ? 1 : 0);
     fprintf(f, "click_pause=%d\n", c->click_pause ? 1 : 0);
+    fprintf(f, "auto_queue=%d\n", c->auto_queue ? 1 : 0);
     fprintf(f, "theme=%d\n", c->theme);
     fprintf(f, "brightness=%.3f\n", c->brightness);
     fprintf(f, "contrast=%.3f\n",   c->contrast);

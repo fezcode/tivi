@@ -25,10 +25,18 @@
   <ellipse cx="220" cy="330" rx="540" ry="230" fill="url(#glow)"/>
   <ellipse cx="1040" cy="30" rx="440" ry="210" fill="url(#glow)"/>
 
-  <!-- logo mark: accent rounded square + play, as in the app icon -->
-  <g transform="translate(80,92)">
-    <rect x="0" y="0" width="96" height="96" rx="26" fill="#c9a45a"/>
-    <path d="M34 24 v48 l40 -24 z" fill="#12100d"/>
+  <!-- logo mark: the retro-TV app icon -->
+  <g transform="translate(80,92) scale(0.375)">
+    <rect width="256" height="256" rx="58" fill="#1c1610"/>
+    <rect x="2" y="2" width="252" height="252" rx="56" fill="none" stroke="#ffffff" stroke-opacity="0.10" stroke-width="4"/>
+    <g stroke="#dfc389" stroke-width="12" stroke-linecap="round">
+      <line x1="108" y1="98" x2="77" y2="47"/>
+      <line x1="148" y1="98" x2="179" y2="47"/>
+    </g>
+    <circle cx="77"  cy="47" r="11" fill="#f0dca6"/>
+    <circle cx="179" cy="47" r="11" fill="#f0dca6"/>
+    <rect x="48" y="96" width="160" height="118" rx="24" fill="none" stroke="#dfc389" stroke-width="15"/>
+    <path d="M112 130 v50 a6.5 6.5 0 0 0 9.8 5.6 l44 -25 a6.5 6.5 0 0 0 0 -11.2 l-44 -25 a6.5 6.5 0 0 0 -9.8 5.6 z" fill="#dfc389"/>
   </g>
 
   <!-- wordmark -->

@@ -43,6 +43,11 @@ void os_snap_set_enabled(bool on);      // suspend hit-testing (fullscreen)
 bool os_is_zoomed(void *hwnd);          // natively maximized (snap / Win+Up)?
 void os_native_maximize_toggle(void *hwnd);
 
+// List the plain files (no directories) of a directory, invoking on_file with a
+// UTF-8 full path per entry. Unicode-safe (FindFirstFileW). Returns the count;
+// 0 on error. Windows-only; a stub elsewhere.
+int os_scan_dir_files(const char *utf8dir, void (*on_file)(const char *utf8_path, void *ud), void *ud);
+
 // Attach a GUI-subsystem (-mwindows) process to the parent console so that
 // printf from CLI modes (-h / -v / --probe) is visible in the terminal.
 void os_console_attach(void);

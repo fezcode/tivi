@@ -45,8 +45,9 @@ static void ao_callback(void *buffer, unsigned int frames) {
     float v = A.volume;
     for (unsigned i = 0; i < n; i++) {
         unsigned idx = (rd & CAP_MASK) * 2u;
-        out[i * 2 + 0] = A.ring[idx + 0] * v;
-        out[i * 2 + 1] = A.ring[idx + 1] * v;
+        float l = A.ring[idx + 0] * v, r = A.ring[idx + 1] * v;
+        out[i * 2 + 0] = (l > 1.0f) ? 1.0f : (l < -1.0f) ? -1.0f : l;   // boosted gain can clip
+        out[i * 2 + 1] = (r > 1.0f) ? 1.0f : (r < -1.0f) ? -1.0f : r;
         rd++;
     }
     atomic_store_explicit(&A.rd, rd, memory_order_release);
@@ -134,7 +135,7 @@ void audio_out_set_speed(double speed) {
 
 void audio_out_set_volume(float v) {
     if (v < 0) v = 0;
-    if (v > 1) v = 1;
+    if (v > 2) v = 2;   // VLC-style software boost up to 200%
     A.volume = v;
 }
 

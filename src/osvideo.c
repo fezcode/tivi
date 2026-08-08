@@ -199,6 +199,25 @@ void os_native_maximize_toggle(void *hwnd) {
     ShowWindow(h, IsZoomed(h) ? SW_RESTORE : SW_MAXIMIZE);
 }
 
+int os_scan_dir_files(const char *utf8dir, void (*on_file)(const char *utf8_path, void *ud), void *ud) {
+    wchar_t wdir[4096], pat[4096];
+    if (!MultiByteToWideChar(CP_UTF8, 0, utf8dir, -1, wdir, 4096)) return 0;
+    swprintf(pat, 4096, L"%ls\\*", wdir); pat[4095] = 0;
+    WIN32_FIND_DATAW fd;
+    HANDLE h = FindFirstFileW(pat, &fd);
+    if (h == INVALID_HANDLE_VALUE) return 0;
+    int count = 0;
+    do {
+        if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) continue;
+        wchar_t full[4096];
+        swprintf(full, 4096, L"%ls\\%ls", wdir, fd.cFileName); full[4095] = 0;
+        char *u = w_to_utf8(full);
+        if (u) { on_file(u, ud); free(u); count++; }
+    } while (FindNextFileW(h, &fd));
+    FindClose(h);
+    return count;
+}
+
 #else
 int  os_open_media_files(void (*on_file)(const char *, void *), void *ud) { (void)on_file; (void)ud; return 0; }
 bool os_open_subtitle_file(char *out, int cap) { (void)out; (void)cap; return false; }
@@ -213,4 +232,5 @@ bool os_snap_active(void) { return false; }
 void os_snap_set_enabled(bool on) { (void)on; }
 bool os_is_zoomed(void *hwnd) { (void)hwnd; return false; }
 void os_native_maximize_toggle(void *hwnd) { (void)hwnd; }
+int  os_scan_dir_files(const char *utf8dir, void (*on_file)(const char *utf8_path, void *ud), void *ud) { (void)utf8dir;(void)on_file;(void)ud; return 0; }
 #endif

@@ -16,13 +16,14 @@
 #include "mediakeys.h"
 #include "singleinst.h"
 
+#include <ctype.h>
 #include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
 
-#define TIVI_VERSION "0.1.1"
+#define TIVI_VERSION "0.2.0"
 #define SS 2                 // supersample factor — the whole UI is rendered at
                              // SS× and downscaled with bilinear, for smooth AA on
                              // every shape, icon, and glyph (as in Timp).
@@ -44,20 +45,55 @@ static bool g_icon_dirty = false;   // re-tint the app icon at the top of the ne
                                     // frame — NEVER inside the render (set_app_icon
                                     // uses a texture mode, which cannot nest)
 
+// "Adaptive" pseudo-theme (index NTHEMES): the palette drifts toward tints derived
+// from the average color of the playing video. Targets are recomputed from a sparse
+// pixel grid ~2×/s (negligible cost) and the live palette eases toward them.
+static Color g_ad_bg0, g_ad_bg1, g_ad_txt, g_ad_mut, g_ad_trk, g_ad_acc;
+static bool  g_ad_have = false;
+static double g_ad_last = 0;
+static float clampf(float v, float lo, float hi);   // defined below
+
+static Color clerp(Color a, Color b, float t) {
+    return (Color){ (unsigned char)(a.r + (b.r - a.r) * t), (unsigned char)(a.g + (b.g - a.g) * t),
+                    (unsigned char)(a.b + (b.b - a.b) * t), 255 };
+}
+
 static void apply_theme(int idx) {
-    if (idx < 0 || idx >= NTHEMES) idx = 0;
+    if (idx < 0 || idx > NTHEMES) idx = 0;
     g_theme = idx;
-    const Theme *t = &THEMES[idx];
+    const Theme *t = &THEMES[(idx < NTHEMES) ? idx : 0];   // adaptive seeds from Gold
     BG0 = t->bg0; BG1 = t->bg1; TXT = t->txt; MUT = t->mut; TRK = t->trk; ACCENT = t->accent;
+    g_ad_have = false;
     g_icon_dirty = true;
 }
 
-// app/taskbar icon — accent rounded square + play mark (re-tinted on theme change)
+// Derive the adaptive palette targets from the frame's average color.
+static void adaptive_targets(float r, float g, float b) {
+    Vector3 hsv = ColorToHSV((Color){ (unsigned char)(r * 255), (unsigned char)(g * 255), (unsigned char)(b * 255), 255 });
+    float h = hsv.x, s = clampf(hsv.y * 1.5f, 0.30f, 0.72f);
+    g_ad_acc = ColorFromHSV(h, s, 0.78f);
+    g_ad_bg0 = ColorFromHSV(h, 0.32f, 0.085f);
+    g_ad_bg1 = ColorFromHSV(h, 0.34f, 0.045f);
+    g_ad_trk = ColorFromHSV(h, 0.28f, 0.22f);
+    g_ad_mut = ColorFromHSV(h, 0.16f, 0.56f);
+    g_ad_txt = ColorFromHSV(h, 0.06f, 0.93f);
+    g_ad_have = true;
+}
+
+// app/taskbar icon — the retro-TV mark from assets/tivi-icon.svg, tinted with the
+// theme accent so the window icon follows the palette (re-tinted on theme change)
 static void set_app_icon(void) {
     RenderTexture2D it = LoadRenderTexture(64, 64);
     BeginTextureMode(it); ClearBackground(BLANK);
-    DrawRectangleRounded((Rectangle){ 4, 4, 56, 56 }, 0.3f, 16, ACCENT);
-    DrawTriangle((Vector2){ 25, 18 }, (Vector2){ 25, 46 }, (Vector2){ 47, 32 }, BG1);
+    Color dark = { 16, 13, 9, 255 };
+    DrawRectangleRounded((Rectangle){ 2, 2, 60, 60 }, 0.34f, 16, dark);
+    DrawLineEx((Vector2){ 27, 26 }, (Vector2){ 19, 12 }, 3.0f, ACCENT);   // antennae
+    DrawLineEx((Vector2){ 37, 26 }, (Vector2){ 45, 12 }, 3.0f, ACCENT);
+    DrawCircleV((Vector2){ 19, 12 }, 2.8f, ACCENT);
+    DrawCircleV((Vector2){ 45, 12 }, 2.8f, ACCENT);
+    DrawRectangleRounded((Rectangle){ 10, 25, 44, 32 }, 0.35f, 12, ACCENT);   // body
+    DrawRectangleRounded((Rectangle){ 15, 30, 34, 22 }, 0.40f, 12, dark);     // screen
+    DrawTriangle((Vector2){ 28, 35 }, (Vector2){ 28, 47 }, (Vector2){ 38, 41 }, ACCENT);
     EndTextureMode();
     Image ico = LoadImageFromTexture(it.texture); ImageFlipVertical(&ico);
     SetWindowIcon(ico); UnloadImage(ico); UnloadRenderTexture(it);
@@ -153,6 +189,16 @@ static void ic_speaker_mute(float cx, float cy, float r, Color c) {
     float wx = cx + r * 0.78f, k = r * 0.42f;
     DrawLineEx((Vector2){ wx - k, cy - k }, (Vector2){ wx + k, cy + k }, IT, c);
     DrawLineEx((Vector2){ wx + k, cy - k }, (Vector2){ wx - k, cy + k }, IT, c);
+}
+static void ic_notes(float cx, float cy, float r, Color c) {  // audio tracks: beamed eighth notes
+    float x1 = cx - r * 0.52f, x2 = cx + r * 0.62f;
+    float y1 = cy + r * 0.62f, y2 = cy + r * 0.42f;         // note heads (right one higher)
+    float t1 = cy - r * 0.62f, t2 = cy - r * 0.82f;         // stem tops
+    DrawCircleV((Vector2){ x1 - r * 0.14f, y1 }, r * 0.32f, c);
+    DrawCircleV((Vector2){ x2 - r * 0.14f, y2 }, r * 0.32f, c);
+    DrawLineEx((Vector2){ x1 + r * 0.12f, y1 }, (Vector2){ x1 + r * 0.12f, t1 }, IT, c);
+    DrawLineEx((Vector2){ x2 + r * 0.12f, y2 }, (Vector2){ x2 + r * 0.12f, t2 }, IT, c);
+    DrawLineEx((Vector2){ x1 + r * 0.12f, t1 }, (Vector2){ x2 + r * 0.12f, t2 }, r * 0.30f, c);   // beam
 }
 static void ic_adjust(float cx, float cy, float r, Color c) {  // three sliders (knob per row)
     float kf[3] = { 0.66f, 0.34f, 0.74f };
@@ -253,6 +299,8 @@ static float g_ctrl = 1.0f;          // 0..1 alpha
 static double g_last_activity = 0;
 static char   g_osd[128]; static double g_osd_until = 0;
 static char   g_note[192]; static double g_note_until = 0;   // top-right "added" toast
+static bool   g_menu_open = false; static Vector2 g_menu_pos; // right-click context menu
+static bool   g_quit = false;                                 // menu "Exit" → leave main loop
 static double g_center_flash = 0;    // play/pause flash timer
 static bool   g_center_play = false;
 
@@ -380,6 +428,77 @@ static void reload_current(void) {
     if (!was_playing) player_pause(P);
 }
 
+// ---------- auto-queue: opening one episode queues the rest of its folder ----------
+static bool is_media_ext(const char *path) {   // mirrors the Open dialog filter
+    static const char *exts[] = {
+        ".mp4", ".mkv", ".webm", ".avi", ".mov", ".m4v", ".wmv", ".flv", ".mpg", ".mpeg",
+        ".ts", ".m2ts", ".mts", ".vob", ".ogv", ".3gp", ".divx",
+        ".mp3", ".flac", ".wav", ".ogg", ".opus", ".m4a", ".aac", ".wma", ".ac3", NULL };
+    const char *e = GetFileExtension(path);
+    if (!e) return false;
+    for (int i = 0; exts[i]; i++) {
+        const char *a = e, *b = exts[i];
+        while (*a && *b && tolower((unsigned char)*a) == (unsigned char)*b) { a++; b++; }
+        if (!*a && !*b) return true;
+    }
+    return false;
+}
+
+// Natural order, case-insensitive: "E2" < "E10". Digit runs compare as numbers.
+static int natcmp(const char *a, const char *b) {
+    while (*a && *b) {
+        if (isdigit((unsigned char)*a) && isdigit((unsigned char)*b)) {
+            const char *pa = a; while (*pa == '0') pa++;
+            const char *pb = b; while (*pb == '0') pb++;
+            const char *ea = pa; while (isdigit((unsigned char)*ea)) ea++;
+            const char *eb = pb; while (isdigit((unsigned char)*eb)) eb++;
+            if (ea - pa != eb - pb) return (ea - pa < eb - pb) ? -1 : 1;
+            for (; pa < ea; pa++, pb++) if (*pa != *pb) return (*pa < *pb) ? -1 : 1;
+            a = ea; b = eb;
+        } else {
+            int ca = tolower((unsigned char)*a), cb = tolower((unsigned char)*b);
+            if (ca != cb) return ca - cb;
+            a++; b++;
+        }
+    }
+    return (*a ? 1 : 0) - (*b ? 1 : 0);
+}
+
+typedef struct { char **v; int n, cap; } StrVec;
+static void aq_collect(const char *path, void *ud) {
+    StrVec *sv = (StrVec *)ud;
+    if (!is_media_ext(path)) return;
+    if (sv->n == sv->cap) { sv->cap = sv->cap ? sv->cap * 2 : 32; sv->v = (char **)realloc(sv->v, sv->cap * sizeof(char *)); }
+    size_t len = strlen(path) + 1;
+    char *d = (char *)malloc(len); memcpy(d, path, len);
+    sv->v[sv->n++] = d;
+}
+static int aq_cmp(const void *x, const void *y) {
+    return natcmp(GetFileName(*(const char *const *)x), GetFileName(*(const char *const *)y));
+}
+
+// Queue the media files that sort (naturally) after `opened` in its directory.
+// Callers gate this to fresh single-file opens so a curated queue is never touched.
+static void autoqueue_siblings(const char *opened) {
+    if (!CFG.auto_queue || !opened) return;
+    char dir[1024]; snprintf(dir, sizeof dir, "%s", opened);
+    char *slash = NULL;
+    for (char *p = dir; *p; p++) if (*p == '/' || *p == '\\') slash = p;
+    if (!slash || slash == dir) return;
+    *slash = 0;
+    StrVec sv = { 0 };
+    os_scan_dir_files(dir, aq_collect, &sv);
+    qsort(sv.v, sv.n, sizeof(char *), aq_cmp);
+    const char *oname = GetFileName(opened);
+    int queued = 0;
+    for (int i = 0; i < sv.n; i++) {
+        if (natcmp(GetFileName(sv.v[i]), oname) > 0) { playlist_add(&PL, sv.v[i]); queued++; }
+        free(sv.v[i]);
+    }
+    free(sv.v);
+    if (queued > 0) note("Queued %d next from folder", queued);
+}
+
 static void add_cb(const char *path, void *ud) { (void)ud; playlist_add(&PL, path); }
 
 static void open_dialog(void) {
@@ -390,6 +509,7 @@ static void open_dialog(void) {
     if (added == 1)      note("Added  %s", GetFileName(PL.paths[playlist_count(&PL) - 1]));
     else if (added > 1)  note("Added %d files to playlist", added);
     if (!was && added > 0) load_file(playlist_current(&PL));
+    if (!was && added == 1 && playlist_count(&PL) == 1 && player_is_open(P)) autoqueue_siblings(playlist_current(&PL));
 }
 
 static void play_index(int i) { playlist_set_index(&PL, i); load_file(playlist_current(&PL)); }
@@ -399,7 +519,7 @@ static void prev_track(void) {
     if (playlist_has_prev(&PL)) load_file(playlist_prev(&PL)); else player_seek(P, 0);
 }
 
-static void set_volume(float v) { g_volume = clampf(v, 0, 1); g_muted = false; player_set_volume(P, g_volume); osd("Volume %d%%", (int)(g_volume * 100 + 0.5f)); }
+static void set_volume(float v) { g_volume = clampf(v, 0, 2); g_muted = false; player_set_volume(P, g_volume); osd("Volume %d%%", (int)(g_volume * 100 + 0.5f)); }
 static void toggle_mute(void)   { g_muted = !g_muted; player_set_volume(P, g_muted ? 0.0f : g_volume); osd(g_muted ? "Muted" : "Volume %d%%", (int)(g_volume * 100 + 0.5f)); }
 
 static void snapshot(void) {
@@ -437,7 +557,7 @@ static void toggle_fullscreen(void) {
         if (!g_aot) ClearWindowState(FLAG_WINDOW_TOPMOST);
         SetWindowSize(g_fs_w, g_fs_h);
         SetWindowPosition(g_fs_x, g_fs_y);
-        os_round_window(hwnd, true);
+        os_round_window(hwnd, !g_maximized && !os_is_zoomed(hwnd));   // was maximized before fullscreen
         os_snap_set_enabled(true);
         g_fullscreen = false;
     }
@@ -445,6 +565,11 @@ static void toggle_fullscreen(void) {
 
 static void toggle_maximize(void) {
     void *hwnd = GetWindowHandle();
+    // In fullscreen the window is an oversized TOPMOST cover with snap disabled;
+    // maximizing on top of that corrupts both state machines (the "restore" rect
+    // becomes the fullscreen rect and resize dies). Treat maximize as "leave
+    // fullscreen" instead.
+    if (g_fullscreen) { toggle_fullscreen(); return; }
     if (os_snap_active()) { os_native_maximize_toggle(hwnd); return; }   // snap-aware
     if (!g_maximized) {
         Vector2 wp = GetWindowPosition();
@@ -473,7 +598,8 @@ static void print_help(void) {
 "  Up / Down        Volume up / down             M              Mute\n"
 "  N / B            Next / previous in playlist   S              Snapshot (PNG)\n"
 "  C                Cycle subtitle track          X              Cycle audio track\n"
-"  [ / ]            Slower / faster   \\           Reset speed\n"
+"  [ / ] or - / +   Slower / faster   \\           Reset speed\n"
+"  Right-click      Context menu\n"
 "  Q  Playlist   A  Adjustments   G  Settings     T  Always on top   Esc  Back\n\n"
 "Drag & drop files onto the window to enqueue them. Media keys are supported.\n",
         TIVI_VERSION);
@@ -574,6 +700,7 @@ int main(int argc, char **argv) {
     for (int i = 1; i < argn; i++) if (args[i][0] != '-') { if (is_sub_ext(args[i])) argSub = args[i]; else playlist_add(&PL, args[i]); }
     if (playlist_count(&PL) > 0) load_file(playlist_current(&PL));
     if (argSub && player_is_open(P)) load_external_subs(argSub);
+    if (playlist_count(&PL) == 1 && player_is_open(P)) autoqueue_siblings(playlist_current(&PL));
 
     g_last_activity = GetTime();
     Vector2 lastMouse = GetMousePosition();
@@ -581,7 +708,8 @@ int main(int argc, char **argv) {
     if (getenv("TIVI_SHOT")) {                        // dev hook: screenshot the UI
         int sf = atoi(getenv("TIVI_SHOT"));           // TIVI_SHOT=<frame> picks the moment; else ~2s in
         shot_frame = (sf > 1) ? sf : 120;
-        if (!getenv("TIVI_SHOT_PLAIN")) g_panel = PANEL_SETTINGS;   // PLAIN=1 → playback view, no panel
+        if (getenv("TIVI_SHOT_PLAYLIST"))    g_panel = PANEL_PLAYLIST;       // panel choice for the shot
+        else if (!getenv("TIVI_SHOT_PLAIN")) g_panel = PANEL_SETTINGS;       // PLAIN=1 → playback view, no panel
         if (getenv("TIVI_SHOT_SCROLL")) g_set_scroll = (float)atoi(getenv("TIVI_SHOT_SCROLL")); }
 
     // Supersampled render target: the whole UI is drawn at SS× then downscaled with
@@ -589,7 +717,7 @@ int main(int argc, char **argv) {
     RenderTexture2D target = LoadRenderTexture(GetScreenWidth() * SS, GetScreenHeight() * SS);
     SetTextureFilter(target.texture, TEXTURE_FILTER_BILINEAR);
 
-    while (!WindowShouldClose()) {
+    while (!WindowShouldClose() && !g_quit) {
         double dt = GetFrameTime();
         double now = GetTime();
         int W = GetScreenWidth(), H = GetScreenHeight();
@@ -598,6 +726,14 @@ int main(int argc, char **argv) {
         bool playing = open && player_is_playing(P);
 
         if (g_icon_dirty) { set_app_icon(); g_icon_dirty = false; }   // theme changed last frame
+
+        // adaptive theme: ease the live palette toward the sampled targets
+        if (g_theme == NTHEMES && g_ad_have) {
+            float k = 1.0f - expf(-(float)dt * 2.2f);
+            BG0 = clerp(BG0, g_ad_bg0, k); BG1 = clerp(BG1, g_ad_bg1, k);
+            TXT = clerp(TXT, g_ad_txt, k); MUT = clerp(MUT, g_ad_mut, k);
+            TRK = clerp(TRK, g_ad_trk, k); ACCENT = clerp(ACCENT, g_ad_acc, k);
+        }
 
         player_update(P, dt);
 
@@ -623,6 +759,7 @@ int main(int argc, char **argv) {
           if (firstNew >= 0) play_index(firstNew);
           if (fwdAdded == 1)      note("Added  %s", GetFileName(PL.paths[playlist_count(&PL) - 1]));
           else if (fwdAdded > 1)  note("Added %d files", fwdAdded);
+          if (fwdAdded == 1 && playlist_count(&PL) == 1 && player_is_open(P)) autoqueue_siblings(playlist_current(&PL));
           if (singleinst_poll_focus()) os_focus_window(hwnd); }
 
         // ---- drag & drop ----
@@ -640,6 +777,7 @@ int main(int argc, char **argv) {
             if (subpath[0] && player_is_open(P)) load_external_subs(subpath);
             if (added == 1)      note("Added  %s", GetFileName(PL.paths[playlist_count(&PL) - 1]));
             else if (added > 1)  note("Added %d files to playlist", added);
+            if (!was && added == 1 && playlist_count(&PL) == 1 && player_is_open(P)) autoqueue_siblings(playlist_current(&PL));
             g_last_activity = now;
         }
 
@@ -683,7 +821,7 @@ int main(int argc, char **argv) {
         // ---- window resize (borderless edges) ----
         // With aero snap active the OS handles edge-resize + caption-drag natively
         // (the hit-tested regions never deliver clicks here), so skip the fallback.
-        if (!os_snap_active() && !g_maximized && !g_resizing && !g_moving) {
+        if (!os_snap_active() && !g_maximized && !g_fullscreen && !g_resizing && !g_moving) {
             const float G = 6;
             int edge = 0;
             if (mp.x <= G) edge |= 1;
@@ -697,7 +835,7 @@ int main(int argc, char **argv) {
                 else if (edge & 3) cur = MOUSE_CURSOR_RESIZE_EW;
                 else cur = MOUSE_CURSOR_RESIZE_NS;
                 SetMouseCursor(cur);
-                if (IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) {
+                if (IsMouseButtonPressed(MOUSE_BUTTON_LEFT) && !g_menu_open) {
                     g_resizing = true; g_resize_edge = edge;
                     Vector2 wp = GetWindowPosition();
                     g_fixed_right = wp.x + W; g_fixed_bottom = wp.y + H;
@@ -721,16 +859,60 @@ int main(int argc, char **argv) {
         }
 
         // ---- window move (drag empty top bar; fallback when no native snap) ----
-        if (!os_snap_active() && !g_resizing && !g_maximized && IsMouseButtonPressed(MOUSE_BUTTON_LEFT)
+        if (!os_snap_active() && !g_resizing && !g_maximized && !g_fullscreen && !g_menu_open && IsMouseButtonPressed(MOUSE_BUTTON_LEFT)
             && mp.y < TBH && mp.x > openR.x + 60 && mp.x < aotR.x - 8) { g_moving = true; g_move_grab = mp; }
         if (g_moving) {
             if (IsMouseButtonDown(MOUSE_BUTTON_LEFT)) { Vector2 wp = GetWindowPosition(); SetWindowPosition((int)(wp.x + mp.x - g_move_grab.x), (int)(wp.y + mp.y - g_move_grab.y)); }
             else g_moving = false;
         }
 
+        // ---- right-click context menu ----
+        if (IsMouseButtonPressed(MOUSE_BUTTON_RIGHT)) { g_menu_open = true; g_menu_pos = mp; g_last_activity = now; }
+        { static int shot_menu = -1;   // dev hook: force the menu open for a screenshot
+          if (shot_menu < 0) shot_menu = getenv("TIVI_SHOT_MENU") ? 1 : 0;
+          if (shot_menu && shot_frame > 0) { g_menu_open = true; g_menu_pos = (Vector2){ W * 0.36f, H * 0.34f }; } }
+        // layout (shared by input below and drawing later this frame)
+        const char *menuLbl[8]; bool menuDot[8]; int menuN = 0;
+        Rectangle menuR = { 0 };
+        float menuRowH = 36, menuPad = 8;
+        if (g_menu_open) {
+            menuLbl[menuN] = (open && playing) ? "Pause" : "Play"; menuDot[menuN++] = false;
+            menuLbl[menuN] = "Open files\xE2\x80\xA6";             menuDot[menuN++] = false;
+            menuLbl[menuN] = "Snapshot";                           menuDot[menuN++] = false;
+            menuLbl[menuN] = g_fullscreen ? "Exit fullscreen" : "Fullscreen"; menuDot[menuN++] = g_fullscreen;
+            menuLbl[menuN] = "Always on top";                      menuDot[menuN++] = g_aot;
+            menuLbl[menuN] = "Playlist";                           menuDot[menuN++] = (g_panel == PANEL_PLAYLIST);
+            menuLbl[menuN] = "Settings";                           menuDot[menuN++] = (g_panel == PANEL_SETTINGS);
+            menuLbl[menuN] = "Exit tivi";                          menuDot[menuN++] = false;
+            float mw = 0;
+            for (int i = 0; i < menuN; i++) { float w2 = MeasureTextEx(fSmall, menuLbl[i], 19, 0.3f).x; if (w2 > mw) mw = w2; }
+            mw += 64;
+            float mh = menuN * menuRowH + menuPad * 2;
+            menuR = (Rectangle){ fminf(g_menu_pos.x, W - mw - 8), fminf(g_menu_pos.y, H - mh - 8), mw, mh };
+            if (menuR.x < 8) menuR.x = 8;
+            if (menuR.y < 8) menuR.y = 8;
+        }
+        bool menuAte = false;   // a click that operated (or closed) the menu eats the event
+        if (g_menu_open && IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) {
+            menuAte = true; g_menu_open = false;
+            if (CheckCollisionPointRec(mp, menuR)) {
+                int mi = (int)((mp.y - menuR.y - menuPad) / menuRowH);
+                if (mi >= 0 && mi < menuN) switch (mi) {
+                    case 0: if (open) { player_toggle(P); g_center_flash = now; g_center_play = player_is_playing(P); } break;
+                    case 1: open_dialog(); break;
+                    case 2: snapshot(); break;
+                    case 3: toggle_fullscreen(); break;
+                    case 4: g_aot = !g_aot; if (g_aot) SetWindowState(FLAG_WINDOW_TOPMOST); else ClearWindowState(FLAG_WINDOW_TOPMOST); osd(g_aot ? "Always on top" : "Always on top off"); break;
+                    case 5: g_panel = (g_panel == PANEL_PLAYLIST) ? PANEL_NONE : PANEL_PLAYLIST; break;
+                    case 6: g_panel = (g_panel == PANEL_SETTINGS) ? PANEL_NONE : PANEL_SETTINGS; break;
+                    case 7: g_quit = true; break;
+                }
+            }
+        }
+
         // ---- click handling (controls) ----
-        bool consumed = false;
-        if (IsMouseButtonPressed(MOUSE_BUTTON_LEFT) && !g_resizing && !g_moving) {
+        bool consumed = menuAte;
+        if (IsMouseButtonPressed(MOUSE_BUTTON_LEFT) && !consumed && !g_resizing && !g_moving) {
             // top bar
             if (CheckCollisionPointRec(mp, closeR)) break;
             else if (CheckCollisionPointRec(mp, minR)) { MinimizeWindow(); consumed = true; }
@@ -754,7 +936,7 @@ int main(int argc, char **argv) {
                     consumed = true;
                 }
                 else if (CheckCollisionPointRec(mp, (Rectangle){ volR.x - 4, volR.y - 10, volR.width + 8, 24 })) {
-                    set_volume((mp.x - volR.x) / volR.width); consumed = true;
+                    set_volume(2.0f * (mp.x - volR.x) / volR.width); consumed = true;   // slider spans 0..200%
                 }
             }
         }
@@ -765,12 +947,12 @@ int main(int argc, char **argv) {
         static bool seek_drag = false, vol_drag = false;
         static bool seek_resume = false;        // was playing when the drag began
         static double seek_last = -1;
-        if (IsMouseButtonPressed(MOUSE_BUTTON_LEFT) && ctl && open && CheckCollisionPointRec(mp, (Rectangle){ seekR.x - 4, seekR.y - 10, seekR.width + 8, 24 })) {
+        if (IsMouseButtonPressed(MOUSE_BUTTON_LEFT) && !menuAte && ctl && open && CheckCollisionPointRec(mp, (Rectangle){ seekR.x - 4, seekR.y - 10, seekR.width + 8, 24 })) {
             seek_drag = true; seek_resume = player_is_playing(P);
             double dur = player_duration(P);
             seek_last = (dur > 0) ? clampf((mp.x - seekR.x) / seekR.width, 0, 1) * dur : -1;
         }
-        if (IsMouseButtonPressed(MOUSE_BUTTON_LEFT) && ctl && CheckCollisionPointRec(mp, (Rectangle){ volR.x - 4, volR.y - 10, volR.width + 8, 24 })) vol_drag = true;
+        if (IsMouseButtonPressed(MOUSE_BUTTON_LEFT) && !menuAte && ctl && CheckCollisionPointRec(mp, (Rectangle){ volR.x - 4, volR.y - 10, volR.width + 8, 24 })) vol_drag = true;
         if (seek_drag) {
             if (IsMouseButtonDown(MOUSE_BUTTON_LEFT)) {
                 double dur = player_duration(P);
@@ -784,7 +966,7 @@ int main(int argc, char **argv) {
                 if (seek_resume && !player_is_playing(P)) player_play(P);
             }
         }
-        if (vol_drag) { if (IsMouseButtonDown(MOUSE_BUTTON_LEFT)) g_volume = clampf((mp.x - volR.x) / volR.width, 0, 1), g_muted = false, player_set_volume(P, g_volume); else vol_drag = false; }
+        if (vol_drag) { if (IsMouseButtonDown(MOUSE_BUTTON_LEFT)) g_volume = 2.0f * clampf((mp.x - volR.x) / volR.width, 0, 1), g_muted = false, player_set_volume(P, g_volume); else vol_drag = false; }
 
         // panel interactions (handled in draw section via helper) — compute panel rect
         Rectangle panelR = { 0 };
@@ -826,8 +1008,8 @@ int main(int argc, char **argv) {
         if (IsKeyPressed(KEY_Q)) g_panel = (g_panel == PANEL_PLAYLIST) ? PANEL_NONE : PANEL_PLAYLIST;
         if (IsKeyPressed(KEY_A)) g_panel = (g_panel == PANEL_ADJUST) ? PANEL_NONE : PANEL_ADJUST;
         if (IsKeyPressed(KEY_G)) g_panel = (g_panel == PANEL_SETTINGS) ? PANEL_NONE : PANEL_SETTINGS;
-        if (IsKeyPressed(KEY_LEFT_BRACKET))  { player_set_speed(P, player_speed(P) - 0.1); osd("Speed %.2fx", player_speed(P)); }
-        if (IsKeyPressed(KEY_RIGHT_BRACKET)) { player_set_speed(P, player_speed(P) + 0.1); osd("Speed %.2fx", player_speed(P)); }
+        if (IsKeyPressed(KEY_LEFT_BRACKET)  || IsKeyPressed(KEY_MINUS) || IsKeyPressed(KEY_KP_SUBTRACT)) { player_set_speed(P, player_speed(P) - 0.1); osd("Speed %.2fx", player_speed(P)); }
+        if (IsKeyPressed(KEY_RIGHT_BRACKET) || IsKeyPressed(KEY_EQUAL) || IsKeyPressed(KEY_KP_ADD))      { player_set_speed(P, player_speed(P) + 0.1); osd("Speed %.2fx", player_speed(P)); }
         if (IsKeyPressed(KEY_BACKSLASH))     { player_set_speed(P, 1.0); osd("Speed 1.00x"); }
         if (IsKeyPressed(KEY_R)) { g_repeat = (g_repeat + 1) % 3; playlist_set_loop(&PL, g_repeat == 2); osd(g_repeat==0?"Repeat off":g_repeat==1?"Repeat one":"Repeat all"); }
         if (IsKeyPressed(KEY_C)) {  // cycle subtitle track
@@ -844,7 +1026,7 @@ int main(int argc, char **argv) {
             if (pick >= 0 && pick != cur) { player_set_audio_track(P, pick); osd("Audio track changed"); }
         }
         if (IsKeyPressed(KEY_O)) open_dialog();
-        if (IsKeyPressed(KEY_ESCAPE)) { if (g_panel != PANEL_NONE) g_panel = PANEL_NONE; else if (g_fullscreen) toggle_fullscreen(); }
+        if (IsKeyPressed(KEY_ESCAPE)) { if (g_menu_open) g_menu_open = false; else if (g_panel != PANEL_NONE) g_panel = PANEL_NONE; else if (g_fullscreen) toggle_fullscreen(); }
 
         // ---- subtitle pipeline ----
         if (open && g_sub_source == SUB_EMBEDDED) {
@@ -890,6 +1072,42 @@ int main(int argc, char **argv) {
             bool planar = false;
             if (player_frame(P, &frm, &changed)) {
                 if (changed) g_perf_vidupd++;
+                // adaptive theme: average a sparse grid (~200 samples, 2×/s — negligible)
+                if (g_theme == NTHEMES && now - g_ad_last > 0.5 && frm.w > 32 && frm.h > 32) {
+                    g_ad_last = now;
+                    int sx = frm.w / 16, sy = frm.h / 12;
+                    float ar = 0, ag = 0, ab = 0; int n = 0;
+                    if (frm.fmt == TIVI_PIX_RGBA) {
+                        for (int yy = sy / 2; yy < frm.h; yy += sy) {
+                            const uint8_t *row = frm.plane[0] + (size_t)yy * frm.stride[0];
+                            for (int xx = sx / 2; xx < frm.w; xx += sx) { const uint8_t *p = row + (size_t)xx * 4; ar += p[0]; ag += p[1]; ab += p[2]; n++; }
+                        }
+                        if (n) adaptive_targets(ar / n / 255.0f, ag / n / 255.0f, ab / n / 255.0f);
+                    } else {
+                        float ay = 0, au = 0, av = 0;
+                        bool p10 = (frm.fmt == TIVI_PIX_P010);
+                        for (int yy = sy / 2; yy < frm.h; yy += sy) {
+                            const uint8_t *yrow = frm.plane[0] + (size_t)yy * frm.stride[0];
+                            const uint8_t *crow = frm.plane[1] + (size_t)(yy / 2) * frm.stride[1];
+                            for (int xx = sx / 2; xx < frm.w; xx += sx) {
+                                if (p10) { ay += ((const uint16_t *)yrow)[xx] / 65535.0f;
+                                           au += ((const uint16_t *)crow)[(xx / 2) * 2] / 65535.0f;
+                                           av += ((const uint16_t *)crow)[(xx / 2) * 2 + 1] / 65535.0f; }
+                                else     { ay += yrow[xx] / 255.0f;
+                                           au += crow[(xx / 2) * 2] / 255.0f;
+                                           av += crow[(xx / 2) * 2 + 1] / 255.0f; }
+                                n++;
+                            }
+                        }
+                        if (n) {   // same affine transform the shader uses
+                            YuvXfm x = yuvtex_transform(&frm);
+                            float y = ay / n, u = au / n, v = av / n;
+                            adaptive_targets(clampf(x.c0.x * y + x.c1.x * u + x.c2.x * v + x.off.x, 0, 1),
+                                             clampf(x.c0.y * y + x.c1.y * u + x.c2.y * v + x.off.y, 0, 1),
+                                             clampf(x.c0.z * y + x.c1.z * u + x.c2.z * v + x.off.z, 0, 1));
+                        }
+                    }
+                }
                 if (frm.fmt == TIVI_PIX_RGBA) {
                     ensure_vtex(frm.w, frm.h);
                     if (changed) UpdateTexture(vtex, frm.plane[0]);
@@ -1029,14 +1247,17 @@ int main(int argc, char **argv) {
             ic_prev(prevR.x + 20, prevR.y + 20, 12, afade(CheckCollisionPointRec(mp, prevR) ? TXT : alpha(TXT, 220), ca));
             ic_next(nextR.x + 20, nextR.y + 20, 12, afade(CheckCollisionPointRec(mp, nextR) ? TXT : alpha(TXT, 220), ca));
             // volume
-            float vshow = g_muted ? 0 : g_volume;
+            float vfrac = clampf((g_muted ? 0 : g_volume) / 2.0f, 0, 1);   // slider spans 0..200%
             if (g_muted) ic_speaker_mute(muteR.x + 16, muteR.y + 16, 11, afade(MUT, ca)); else ic_audio(muteR.x + 16, muteR.y + 16, 11, afade(CheckCollisionPointRec(mp, muteR) ? TXT : MUT, ca));
             DrawRectangleRounded(volR, 1, 6, afade(TRK, ca));
-            DrawRectangleRounded((Rectangle){ volR.x, volR.y, volR.width * vshow, volR.height }, 1, 6, afade((Color){ 190, 178, 150, 255 }, ca));
-            scircle(volR.x + volR.width * vshow, volR.y + 3.5f, 7, afade(TXT, ca));
+            DrawRectangleRec((Rectangle){ volR.x + volR.width * 0.5f - 1, volR.y - 3, 2, 13 }, afade(alpha(MUT, 130), ca));   // 100% notch
+            DrawRectangleRounded((Rectangle){ volR.x, volR.y, volR.width * fminf(vfrac, 0.5f), volR.height }, 1, 6, afade((Color){ 190, 178, 150, 255 }, ca));
+            if (vfrac > 0.5f)   // boosted range past 100% runs hot
+                DrawRectangleRounded((Rectangle){ volR.x + volR.width * 0.5f, volR.y, volR.width * (vfrac - 0.5f), volR.height }, 1, 6, afade((Color){ 226, 138, 88, 255 }, ca));
+            scircle(volR.x + volR.width * vfrac, volR.y + 3.5f, 7, afade(TXT, ca));
             // right buttons
             ic_cc(ccR.x + 18, ccR.y + 18, 13, afade((g_subs_on && g_sub_source != SUB_NONE) ? ACCENT : (CheckCollisionPointRec(mp, ccR) ? TXT : MUT), ca));
-            ic_audio(audR.x + 18, audR.y + 18, 12, afade(g_panel == PANEL_AUDIO ? ACCENT : (CheckCollisionPointRec(mp, audR) ? TXT : MUT), ca));
+            ic_notes(audR.x + 18, audR.y + 18, 12, afade(g_panel == PANEL_AUDIO ? ACCENT : (CheckCollisionPointRec(mp, audR) ? TXT : MUT), ca));
             ic_adjust(adjR.x + 18, adjR.y + 18, 12, afade(g_panel == PANEL_ADJUST ? ACCENT : (CheckCollisionPointRec(mp, adjR) ? TXT : MUT), ca));
             ic_list(plR.x + 18, plR.y + 18, 12, afade(g_panel == PANEL_PLAYLIST ? ACCENT : (CheckCollisionPointRec(mp, plR) ? TXT : MUT), ca));
             ic_gear(setR.x + 18, setR.y + 18, 12, afade(g_panel == PANEL_SETTINGS ? ACCENT : (CheckCollisionPointRec(mp, setR) ? TXT : MUT), ca));
@@ -1209,9 +1430,9 @@ int main(int argc, char **argv) {
                 float yy = viewTop + 6 - g_set_scroll;
 
                 // toggles
-                const char *labels[4] = { "Always on top", "Black letterbox", "Shuffle", "Click video to pause" };
-                bool st[4] = { g_aot, g_letterbox_black, playlist_shuffle(&PL), g_click_pause };
-                for (int i = 0; i < 4; i++) {
+                const char *labels[5] = { "Always on top", "Black letterbox", "Shuffle", "Click video to pause", "Auto-queue folder" };
+                bool st[5] = { g_aot, g_letterbox_black, playlist_shuffle(&PL), g_click_pause, CFG.auto_queue };
+                for (int i = 0; i < 5; i++) {
                     Rectangle row = { px - 6, yy - 6, iw + 12, 46 };
                     bool hov = inview && CheckCollisionPointRec(mp, row);
                     if (hov) DrawRectangleRounded(row, 0.3f, 6, alpha(WHITE, 10));
@@ -1223,7 +1444,8 @@ int main(int argc, char **argv) {
                         if (i == 0) { g_aot = !g_aot; if (g_aot) SetWindowState(FLAG_WINDOW_TOPMOST); else ClearWindowState(FLAG_WINDOW_TOPMOST); }
                         else if (i == 1) g_letterbox_black = !g_letterbox_black;
                         else if (i == 2) playlist_set_shuffle(&PL, !playlist_shuffle(&PL));
-                        else g_click_pause = !g_click_pause;
+                        else if (i == 3) g_click_pause = !g_click_pause;
+                        else { CFG.auto_queue = !CFG.auto_queue; osd("Auto-queue folder %s", CFG.auto_queue ? "on" : "off"); }
                         consumed = true;
                     }
                     yy += 50;
@@ -1251,16 +1473,23 @@ int main(int argc, char **argv) {
                 DrawTextEx(fSmall, "Theme", (Vector2){ px, yy + 6 }, 20, 0.3f, TXT);
                 {
                     float sw = 28, gap = 10;
-                    float tx = panelR.x + panelR.width - 22 - NTHEMES * (sw + gap) + gap;
-                    for (int k = 0; k < NTHEMES; k++) {
+                    float tx = panelR.x + panelR.width - 22 - (NTHEMES + 1) * (sw + gap) + gap;
+                    for (int k = 0; k <= NTHEMES; k++) {
                         Rectangle cell = { tx + k * (sw + gap), yy + 1, sw, sw };
                         bool hs = inview && CheckCollisionPointRec(mp, cell);
-                        DrawRectangleRounded(cell, 0.5f, 8, THEMES[k].bg0);
-                        DrawCircleV((Vector2){ cell.x + sw / 2, cell.y + sw / 2 }, 8, THEMES[k].accent);
+                        Vector2 cc = { cell.x + sw / 2, cell.y + sw / 2 };
+                        if (k < NTHEMES) {
+                            DrawRectangleRounded(cell, 0.5f, 8, THEMES[k].bg0);
+                            DrawCircleV(cc, 8, THEMES[k].accent);
+                        } else {   // Adaptive: two-tone dot — palette follows the video
+                            DrawRectangleRounded(cell, 0.5f, 8, (Color){ 13, 13, 14, 255 });
+                            DrawCircleSector(cc, 8, 90, 270, 16, (Color){ 201, 130, 74, 255 });
+                            DrawCircleSector(cc, 8, 270, 450, 16, (Color){ 92, 148, 210, 255 });
+                        }
                         if (k == g_theme)  DrawRectangleRoundedLines(cell, 0.5f, 8, TXT);
                         else if (hs)       DrawRectangleRoundedLines(cell, 0.5f, 8, alpha(TXT, 110));
                         else               DrawRectangleRoundedLines(cell, 0.5f, 8, alpha(WHITE, 24));
-                        if (hs && IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) { apply_theme(k); osd("Theme: %s", THEMES[k].name); consumed = true; }
+                        if (hs && IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) { apply_theme(k); osd("Theme: %s", k < NTHEMES ? THEMES[k].name : "Adaptive"); consumed = true; }
                     }
                     yy += 56;
                 }
@@ -1460,6 +1689,20 @@ int main(int argc, char **argv) {
             DrawTextEx(fUI, g_osd, (Vector2){ ox, oy }, 26, 0.3f, afade(TXT, k));
         }
 
+        // ---- right-click context menu (topmost) ----
+        if (g_menu_open && menuN > 0) {
+            DrawRectangleRounded((Rectangle){ menuR.x + 3, menuR.y + 4, menuR.width, menuR.height }, 0.12f, 10, alpha(BLACK, 90));   // soft shadow
+            DrawRectangleRounded(menuR, 0.12f, 10, alpha(BG0, 250));
+            DrawRectangleRoundedLines(menuR, 0.12f, 10, alpha(WHITE, 26));
+            for (int i = 0; i < menuN; i++) {
+                Rectangle row = { menuR.x + 5, menuR.y + menuPad + i * menuRowH, menuR.width - 10, menuRowH };
+                bool hov = CheckCollisionPointRec(mp, row);
+                if (hov) DrawRectangleRounded(row, 0.3f, 8, alpha(ACCENT, 46));
+                DrawTextEx(fSmall, menuLbl[i], (Vector2){ menuR.x + 20, row.y + (menuRowH - 19) / 2 - 1 }, 19, 0.3f, hov ? TXT : alpha(TXT, 225));
+                if (menuDot[i]) DrawCircleV((Vector2){ menuR.x + menuR.width - 18, row.y + menuRowH / 2 }, 3.6f, ACCENT);
+            }
+        }
+
         // ---- top-right notification (file added, etc.) ----
         if (now < g_note_until) {
             float k = clampf((float)((g_note_until - now) / 0.5), 0, 1);
@@ -1525,7 +1768,8 @@ int main(int argc, char **argv) {
     // ---- persist + cleanup ----
     CFG.volume = g_volume; CFG.always_on_top = g_aot; CFG.subtitles_enabled = g_subs_on; CFG.letterbox_black = g_letterbox_black;
     CFG.click_pause = g_click_pause; CFG.theme = g_theme;
-    if (!g_maximized && !os_is_zoomed(GetWindowHandle())) { Vector2 wp = GetWindowPosition(); CFG.win_x = (int)wp.x; CFG.win_y = (int)wp.y; CFG.win_w = GetScreenWidth(); CFG.win_h = GetScreenHeight(); CFG.has_win = true; }
+    if (g_fullscreen) { CFG.win_x = g_fs_x; CFG.win_y = g_fs_y; CFG.win_w = g_fs_w; CFG.win_h = g_fs_h; CFG.has_win = true; }   // pre-fullscreen geometry, not the monitor cover
+    else if (!g_maximized && !os_is_zoomed(GetWindowHandle())) { Vector2 wp = GetWindowPosition(); CFG.win_x = (int)wp.x; CFG.win_y = (int)wp.y; CFG.win_w = GetScreenWidth(); CFG.win_h = GetScreenHeight(); CFG.has_win = true; }
     viconfig_save(&CFG);
 
     player_destroy(P);

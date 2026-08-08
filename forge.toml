@@ -1,6 +1,6 @@
 ﻿[app]
 name    = "tivi"
-version = "0.1.1"
+version = "0.2.0"
 id      = "io.tivi.tivi"
 
 [meta]
@@ -21,8 +21,8 @@ keep = []
 
 [[steps]]
 type  = "welcome"
-title = "tivi 0.1.1"
-body  = "This wizard will install tivi 0.1.1 on your computer.\n\ntivi is a small, native, resizable video player (FFmpeg-powered, Timp-styled).\n\nClick Next to continue."
+title = "tivi 0.2.0"
+body  = "This wizard will install tivi 0.2.0 on your computer.\n\ntivi is a small, native, resizable video player (FFmpeg-powered, Timp-styled).\n\nClick Next to continue."
 
 [[steps]]
 type  = "license"
@@ -33,7 +33,7 @@ file  = "LICENSE.txt"
 [[steps]]
 type  = "folder"
 title = "Select Folder"
-body  = "Choose where to install tivi 0.1.1."
+body  = "Choose where to install tivi 0.2.0."
 
 [[steps]]
 type  = "shortcuts"
@@ -89,4 +89,4 @@ data  = "${INSTALLDIR}"
 hive  = "HKLM"
 key   = "Software\\tivi\\tivi"
 value = "Version"
-data  = "0.1.1"
+data  = "0.2.0"

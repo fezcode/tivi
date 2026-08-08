@@ -10,6 +10,7 @@ typedef struct {
     bool  subtitles_enabled;
     bool  letterbox_black;   // pure-black letterbox bars instead of the warm tint
     bool  click_pause;       // single click on the video toggles play/pause
+    bool  auto_queue;        // opening one file queues the later episodes in its folder
     int   theme;             // UI palette index (see THEMES in main.c)
 
     // Video adjustments (VLC "Video Effects" essentials).

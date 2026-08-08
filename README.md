@@ -41,8 +41,13 @@ subtitles, video adjustments, and track switching, wrapped in a borderless, flui
   authored ASS styling is respected.
 - 🎯 **Precise seeking** — arrow-key seeks land exactly on target even on WEB-DLs with 10–20 s
   keyframe gaps (keyframe seek + preroll decode).
+- 📺 **Auto-queue** — open one episode and the rest of the folder queues behind it automatically,
+  in natural order (`E2` before `E10`); toggleable in Settings.
 - 🎨 **Video adjustments & themes** — brightness, contrast, saturation, hue, gamma live on the GPU;
-  five color themes (Gold, Ocean, Forest, Rose, Slate).
+  five color themes (Gold, Ocean, Forest, Rose, Slate) plus an **Adaptive** theme that tints the
+  UI from the colors of what's playing.
+- 🔊 **Volume boost** — VLC-style software amplification up to **200%** for quiet media, with a
+  100% notch on the slider.
 - 🪟 **Native feel** — borderless resizable window (drag any edge), aero snap, Win11 rounded
   corners + shadow, fullscreen, always-on-top, letterboxed fluid layout.
 - 🎚️ **Transport** — play/pause, drag-to-seek, ±5 s / ±10 s, volume, mute, playback speed
@@ -68,7 +73,8 @@ Settings live in `%APPDATA%\tivi` and survive uninstall.
 - **Open**: drag files/folders onto the window, click **`+`** (top-left), or press `O`.
 - **Subtitle files**: drag a `.srt`/`.ass`/… onto the window, or CC panel › *Load subtitle file…*
 - **Resize**: drag any window edge or corner. **Move**: drag the top bar.
-- **Click the video** to play/pause; **double-click** for fullscreen.
+- **Click the video** to play/pause; **double-click** for fullscreen; **right-click** for the
+  context menu (play/pause, open, snapshot, fullscreen, always-on-top, panels, exit).
 
 ### ⌨️ Keyboard
 
@@ -79,7 +85,7 @@ Settings live in `%APPDATA%\tivi` and survive uninstall.
 | ↑ / ↓ | Volume up / down | `M` | Mute |
 | `N` / `B` | Next / previous | `S` | Snapshot (PNG) |
 | `C` | Cycle subtitle track | `X` | Cycle audio track |
-| `[` / `]` | Slower / faster | `\` | Reset speed |
+| `[` / `]` or `-` / `+` | Slower / faster | `\` | Reset speed |
 | `Q` | Playlist panel | `A` | Adjustments panel |
 | `G` | Settings panel | `T` | Always on top |
 | `R` | Cycle repeat | Esc | Back / exit fullscreen |
