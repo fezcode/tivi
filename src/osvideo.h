@@ -56,4 +56,9 @@ bool os_desktop_dir(char *out, int cap);
 // printf from CLI modes (-h / -v / --probe) is visible in the terminal.
 void os_console_attach(void);
 
+// macOS: route Finder "Open With" / double-click (Apple Events — they never
+// arrive as argv) into the single-instance queue the main loop already polls.
+// Call once in the first instance, before the window exists. No-op elsewhere.
+void os_open_files_handler_install(void);
+
 #endif

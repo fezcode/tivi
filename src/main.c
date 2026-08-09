@@ -102,6 +102,33 @@ static void set_app_icon(void) {
 // ---------- fonts ----------
 static Font fBig, fUI, fSmall;
 
+// Platform UI fonts — Segoe UI on Windows; SF Pro for text on macOS (the
+// variable SFNS.ttf loads at its Regular default, so the semibold weight falls
+// back to Arial Bold, the closest glyf-outline weight stb_truetype can read);
+// DejaVu on Linux. First existing candidate wins.
+#ifdef _WIN32
+static const char *UI_SEMIBOLD[] = { "C:/Windows/Fonts/seguisb.ttf" };
+static const char *UI_REGULAR[]  = { "C:/Windows/Fonts/segoeui.ttf" };
+#elif defined(__APPLE__)
+static const char *UI_SEMIBOLD[] = { "/System/Library/Fonts/Supplemental/Arial Bold.ttf",
+                                     "/System/Library/Fonts/Supplemental/Tahoma Bold.ttf",
+                                     "/System/Library/Fonts/Supplemental/Trebuchet MS Bold.ttf" };
+static const char *UI_REGULAR[]  = { "/System/Library/Fonts/SFNS.ttf",
+                                     "/System/Library/Fonts/Supplemental/Arial.ttf",
+                                     "/System/Library/Fonts/Supplemental/Tahoma.ttf" };
+#else
+static const char *UI_SEMIBOLD[] = { "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+                                     "/usr/share/fonts/TTF/DejaVuSans-Bold.ttf" };
+static const char *UI_REGULAR[]  = { "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+                                     "/usr/share/fonts/TTF/DejaVuSans.ttf" };
+#endif
+
+static Font load_ui_font(const char **cands, int n, int px, int *cps, int cpc) {
+    for (int i = 0; i < n; i++)
+        if (FileExists(cands[i])) return LoadFontEx(cands[i], px, cps, cpc);
+    return LoadFontEx(cands[0], px, cps, cpc);   // missing everywhere → raylib default
+}
+
 // ---------- helpers ----------
 static float approach(float c, float t, float dt) { return c + (t - c) * (1.0f - expf(-dt * 14.0f)); }
 static Color alpha(Color c, unsigned char a) { c.a = a; return c; }
@@ -634,6 +661,7 @@ int main(int argc, char **argv) {
         return 0;
     }
     singleinst_listen_start();
+    os_open_files_handler_install();   // Finder "Open With" → the same queue
 
     viconfig_load(&CFG);
     g_volume = CFG.volume; g_aot = CFG.always_on_top; g_subs_on = CFG.subtitles_enabled; g_letterbox_black = CFG.letterbox_black;
@@ -669,9 +697,9 @@ int main(int argc, char **argv) {
     for (int c = 0x20; c <= 0x24F; c++) cps[cpc++] = c;
     static const int extra[] = { 0x2026, 0x2022, 0x2013, 0x2014, 0x2018, 0x2019, 0x201C, 0x201D };
     for (unsigned i = 0; i < sizeof(extra) / sizeof(extra[0]); i++) cps[cpc++] = extra[i];
-    fBig   = LoadFontEx("C:/Windows/Fonts/seguisb.ttf", 64, cps, cpc);
-    fUI    = LoadFontEx("C:/Windows/Fonts/segoeui.ttf", 40, cps, cpc);
-    fSmall = LoadFontEx("C:/Windows/Fonts/segoeui.ttf", 30, cps, cpc);
+    fBig   = load_ui_font(UI_SEMIBOLD, (int)(sizeof(UI_SEMIBOLD)/sizeof(UI_SEMIBOLD[0])), 64, cps, cpc);
+    fUI    = load_ui_font(UI_REGULAR,  (int)(sizeof(UI_REGULAR)/sizeof(UI_REGULAR[0])),  40, cps, cpc);
+    fSmall = load_ui_font(UI_REGULAR,  (int)(sizeof(UI_REGULAR)/sizeof(UI_REGULAR[0])),  30, cps, cpc);
     if (fBig.texture.id == 0) fBig = GetFontDefault();
     if (fUI.texture.id == 0)  fUI = GetFontDefault();
     if (fSmall.texture.id == 0) fSmall = GetFontDefault();
@@ -1594,9 +1622,15 @@ int main(int argc, char **argv) {
                 DrawLineEx((Vector2){ px, yy }, (Vector2){ px + iw, yy }, 1, alpha(WHITE, 16)); yy += 14;
                 DrawTextEx(fSmall, "SUBTITLES", (Vector2){ px, yy }, 15, 3.0f, alpha(ACCENT, 200)); yy += 26;
                 {
-                    // font family stepper: < Name >
+                    // font family stepper: < Name > — names must resolve through the
+                    // platform's libass font provider (DirectWrite / CoreText)
+#ifdef __APPLE__
+                    static const char *FONTS[] = { "sans-serif", "Helvetica Neue", "Arial", "Verdana", "Tahoma",
+                                                   "Avenir Next", "Georgia", "Times New Roman", "Menlo", "Comic Sans MS" };
+#else
                     static const char *FONTS[] = { "sans-serif", "Segoe UI", "Arial", "Verdana", "Tahoma",
                                                    "Calibri", "Georgia", "Times New Roman", "Consolas", "Comic Sans MS" };
+#endif
                     const int NF = (int)(sizeof(FONTS) / sizeof(FONTS[0]));
                     DrawTextEx(fSmall, "Font", (Vector2){ px, yy + 4 }, 20, 0.3f, TXT);
                     int ci = 0; for (int k = 0; k < NF; k++) if (!strcmp(FONTS[k], CFG.sub_font)) { ci = k; break; }

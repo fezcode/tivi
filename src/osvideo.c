@@ -229,7 +229,7 @@ int os_scan_dir_files(const char *utf8dir, void (*on_file)(const char *utf8_path
     return count;
 }
 
-#else
+#elif !defined(__APPLE__)   /* macOS lives in osvideo_mac.m */
 int  os_open_media_files(void (*on_file)(const char *, void *), void *ud) { (void)on_file; (void)ud; return 0; }
 bool os_open_subtitle_file(char *out, int cap) { (void)out; (void)cap; return false; }
 void os_round_window(void *hwnd, bool rounded) { (void)hwnd; (void)rounded; }
@@ -245,4 +245,9 @@ bool os_is_zoomed(void *hwnd) { (void)hwnd; return false; }
 void os_native_maximize_toggle(void *hwnd) { (void)hwnd; }
 int  os_scan_dir_files(const char *utf8dir, void (*on_file)(const char *utf8_path, void *ud), void *ud) { (void)utf8dir;(void)on_file;(void)ud; return 0; }
 bool os_desktop_dir(char *out, int cap) { (void)out;(void)cap; return false; }
+#endif
+
+// Finder open-events only exist on macOS (implemented in osvideo_mac.m).
+#ifndef __APPLE__
+void os_open_files_handler_install(void) {}
 #endif

@@ -174,16 +174,27 @@ static enum AVPixelFormat get_hw_format(AVCodecContext *ctx, const enum AVPixelF
     return avcodec_default_get_format(ctx, fmts);   // GPU declined -> software
 }
 
-// Try to attach a D3D11VA GPU device to this video decoder. On any failure
-// (decoder has no D3D11VA config, no compatible GPU, driver refuses) it leaves
-// the context untouched, so the caller silently gets a normal software decoder.
+// The platform GPU decode API: D3D11VA on Windows, VideoToolbox on macOS.
+// Decoded frames are downloaded to system memory either way (NV12 / P010), so
+// everything downstream — GPU shader convert included — is shared.
+#ifdef __APPLE__
+#define HW_DEVICE_TYPE AV_HWDEVICE_TYPE_VIDEOTOOLBOX
+#define HW_DEVICE_NAME "VideoToolbox"
+#else
+#define HW_DEVICE_TYPE AV_HWDEVICE_TYPE_D3D11VA
+#define HW_DEVICE_NAME "D3D11VA"
+#endif
+
+// Try to attach the platform GPU decode device to this video decoder. On any
+// failure (decoder has no GPU config, no compatible GPU, driver refuses) it
+// leaves the context untouched, so the caller silently gets a software decoder.
 static void try_enable_hw(Player *p, AVCodecContext *ctx, const AVCodec *dec) {
     if (!p->want_hw) return;                 // hardware decode disabled in settings
-    const enum AVHWDeviceType type = AV_HWDEVICE_TYPE_D3D11VA;
+    const enum AVHWDeviceType type = HW_DEVICE_TYPE;
     enum AVPixelFormat hwfmt = AV_PIX_FMT_NONE;
     for (int i = 0;; i++) {
         const AVCodecHWConfig *cfg = avcodec_get_hw_config(dec, i);
-        if (!cfg) return;   // decoder can't do D3D11VA (e.g. AV1 on a build without it)
+        if (!cfg) return;   // decoder can't do GPU decode (e.g. AV1 on a build without it)
         if ((cfg->methods & AV_CODEC_HW_CONFIG_METHOD_HW_DEVICE_CTX) && cfg->device_type == type) {
             hwfmt = cfg->pix_fmt; break;
         }
@@ -327,7 +338,7 @@ static void decode_video(Player *p, AVPacket *pkt, AVFrame *frame) {
 
         if (!p->hw_logged) {
             p->hw_logged = true;
-            printf("video: %s decode, %s -> %s\n", p->hw_in_use ? "D3D11VA GPU" : "software (CPU)",
+            printf("video: %s decode, %s -> %s\n", p->hw_in_use ? HW_DEVICE_NAME " GPU" : "software (CPU)",
                    av_get_pix_fmt_name(src->format) ? av_get_pix_fmt_name(src->format) : "?",
                    fast ? "GPU shader convert" : "CPU sws convert");
             fflush(stdout);
@@ -1051,7 +1062,7 @@ bool player_snapshot_rgba(Player *p, uint8_t **rgba, int *w, int *h) {
 void player_set_hw_decode(Player *p, bool on)   { p->want_hw = on; }
 void player_set_gpu_convert(Player *p, bool on) { M_lock(&p->lock); p->want_gpu_convert = on; M_unlock(&p->lock); }
 bool player_hw_active(const Player *p)          { return p->hw_in_use; }
-const char *player_decode_desc(const Player *p) { return p->hw_in_use ? "D3D11VA" : "software"; }
+const char *player_decode_desc(const Player *p) { return p->hw_in_use ? HW_DEVICE_NAME : "software"; }
 const char *player_convert_desc(const Player *p) {
     switch (p->disp_fmt) {
         case TIVI_PIX_P010: return "GPU shader (p010)";

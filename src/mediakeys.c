@@ -41,7 +41,7 @@ void mediakeys_start(void) {
 }
 int mediakeys_poll(void) { return (int)InterlockedExchange(&g_action, MK_NONE); }
 
-#else
+#elif !defined(__APPLE__)   /* macOS lives in mediakeys_mac.m */
 void mediakeys_start(void) {}
 int  mediakeys_poll(void) { return 0; }
 #endif

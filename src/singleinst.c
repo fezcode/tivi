@@ -125,13 +125,154 @@ bool singleinst_poll_focus(void) {
     return InterlockedExchange(&g_focus_pending, 0) != 0;
 }
 
-#else  // ---- non-Windows: every launch is its own instance ----
+#else  // ---- POSIX (macOS / Linux): Unix domain socket in the config dir ----
 
-bool singleinst_acquire(void)                    { return true; }
-bool singleinst_send_file(const char *utf8_path) { (void)utf8_path; return false; }
-bool singleinst_send_focus(void)                 { return false; }
-void singleinst_listen_start(void)               {}
-bool singleinst_poll_file(char *out, int cap)    { (void)out; (void)cap; return false; }
-bool singleinst_poll_focus(void)                 { return false; }
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <unistd.h>
+#include <pthread.h>
+#include <sys/socket.h>
+#include <sys/stat.h>
+#include <sys/un.h>
+#include <errno.h>
+
+#define SI_MAXPATH 4096
+#define SI_QDEPTH  32
+
+static int             g_listen_fd = -1;
+static pthread_mutex_t g_lock = PTHREAD_MUTEX_INITIALIZER;
+static char            g_queue[SI_QDEPTH][SI_MAXPATH];
+static int             g_qhead, g_qtail;       // ring buffer (head==tail → empty)
+static int             g_focus_pending;
+static char            g_sock_path[512];
+
+static const char *sock_path(void) {
+    if (!g_sock_path[0]) {
+        const char *home = getenv("HOME");
+        if (!home || !*home) home = "/tmp";
+        snprintf(g_sock_path, sizeof(g_sock_path), "%s/.tivi", home);
+        mkdir(g_sock_path, 0755);
+        size_t n = strlen(g_sock_path);
+        snprintf(g_sock_path + n, sizeof(g_sock_path) - n, "/tivi.sock");
+    }
+    return g_sock_path;
+}
+
+static int sock_connect(void) {
+    int fd = socket(AF_UNIX, SOCK_STREAM, 0);
+    if (fd < 0) return -1;
+    struct sockaddr_un a; memset(&a, 0, sizeof(a));
+    a.sun_family = AF_UNIX;
+    snprintf(a.sun_path, sizeof(a.sun_path), "%s", sock_path());
+    if (connect(fd, (struct sockaddr *)&a, sizeof(a)) != 0) { close(fd); return -1; }
+    return fd;
+}
+
+bool singleinst_acquire(void) {
+    // A live socket means a running tivi; a dead file is a stale crash leftover.
+    int probe = sock_connect();
+    if (probe >= 0) { close(probe); return false; }
+    unlink(sock_path());
+
+    int fd = socket(AF_UNIX, SOCK_STREAM, 0);
+    if (fd < 0) return true;   // can't own the socket — behave standalone
+    struct sockaddr_un a; memset(&a, 0, sizeof(a));
+    a.sun_family = AF_UNIX;
+    snprintf(a.sun_path, sizeof(a.sun_path), "%s", sock_path());
+    if (bind(fd, (struct sockaddr *)&a, sizeof(a)) != 0 || listen(fd, 8) != 0) {
+        close(fd);
+        return true;
+    }
+    g_listen_fd = fd;
+    return true;
+}
+
+static bool send_line(char tag, const char *payload) {
+    int fd = sock_connect();
+    if (fd < 0) return false;
+    char buf[SI_MAXPATH + 8];
+    int n = snprintf(buf, sizeof(buf), "%c%s\n", tag, payload ? payload : "");
+    bool ok = write(fd, buf, (size_t)n) == n;
+    close(fd);
+    return ok;
+}
+
+bool singleinst_send_file(const char *utf8_path) { return send_line('F', utf8_path); }
+bool singleinst_send_focus(void)                 { return send_line('R', NULL); }
+
+static void queue_push(const char *path) {
+    pthread_mutex_lock(&g_lock);
+    int next = (g_qtail + 1) % SI_QDEPTH;
+    if (next != g_qhead) {
+        snprintf(g_queue[g_qtail], SI_MAXPATH, "%s", path);
+        g_qtail = next;
+    }
+    pthread_mutex_unlock(&g_lock);
+}
+
+static void *listen_thread(void *p) {
+    (void)p;
+    for (;;) {
+        int c = accept(g_listen_fd, NULL, NULL);
+        if (c < 0) { if (errno == EINTR) continue; break; }
+        char buf[SI_MAXPATH + 8]; int total = 0;
+        for (;;) {
+            ssize_t r = read(c, buf + total, sizeof(buf) - 1 - total);
+            if (r <= 0) break;
+            total += (int)r;
+            if (total >= (int)sizeof(buf) - 1) break;
+        }
+        close(c);
+        buf[total] = 0;
+        // one message per line: F<path> = play this file, R = raise the window
+        char *line = buf;
+        while (line && *line) {
+            char *nl = strchr(line, '\n');
+            if (nl) *nl = 0;
+            if (line[0] == 'F' && line[1]) queue_push(line + 1);
+            else if (line[0] == 'R') {
+                pthread_mutex_lock(&g_lock);
+                g_focus_pending = 1;
+                pthread_mutex_unlock(&g_lock);
+            }
+            line = nl ? nl + 1 : NULL;
+        }
+        // any handed-off song should also raise the window, matching Windows
+        pthread_mutex_lock(&g_lock);
+        g_focus_pending = 1;
+        pthread_mutex_unlock(&g_lock);
+    }
+    return NULL;
+}
+
+void singleinst_listen_start(void) {
+    if (g_listen_fd < 0) return;
+    pthread_t t;
+    if (pthread_create(&t, NULL, listen_thread, NULL) == 0) pthread_detach(t);
+}
+
+bool singleinst_poll_file(char *out, int cap) {
+    bool got = false;
+    pthread_mutex_lock(&g_lock);
+    if (g_qhead != g_qtail) {
+        int n = (int)strlen(g_queue[g_qhead]);
+        if (n >= cap) n = cap - 1;
+        if (n > 0) memcpy(out, g_queue[g_qhead], (size_t)n);
+        out[n] = 0;
+        g_qhead = (g_qhead + 1) % SI_QDEPTH;
+        got = true;
+    }
+    pthread_mutex_unlock(&g_lock);
+    return got;
+}
+
+bool singleinst_poll_focus(void) {
+    pthread_mutex_lock(&g_lock);
+    int f = g_focus_pending;
+    g_focus_pending = 0;
+    pthread_mutex_unlock(&g_lock);
+    return f != 0;
+}
 
 #endif
