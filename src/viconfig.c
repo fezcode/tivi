@@ -6,24 +6,45 @@
 
 #ifdef _WIN32
 #include <windows.h>
+#else
+#include <sys/stat.h>
+#include <sys/types.h>
 #endif
 
-// Config home: %APPDATA%\tivi\config.ini — one predictable location for every
-// install. (0.2.1 briefly wrote next to the exe; load still merges such a file
-// back once and deletes it, so nothing set under 0.2.1 is lost.)
+// Config home: %APPDATA%\fezcode\tivi\config.ini — one Fezcode-owned tree for
+// every app in the suite. macOS mirrors it at
+// ~/Library/Application Support/fezcode/tivi/, other Unix at ~/.config/fezcode/tivi/.
+// (0.2.1 briefly wrote next to the exe; load still merges such a file back once
+// and deletes it, so nothing set under 0.2.1 is lost.)
 
 static void cfg_path(char *out, int cap) {
 #ifdef _WIN32
     const char *appdata = getenv("APPDATA");
     if (appdata && *appdata) {
-        char dir[512]; snprintf(dir, sizeof(dir), "%s\\tivi", appdata);
+        char dir[512];
+        snprintf(dir, sizeof(dir), "%s\\fezcode", appdata);
+        CreateDirectoryA(dir, NULL);                 // parent first — no mkdir -p on Win32
+        snprintf(dir, sizeof(dir), "%s\\fezcode\\tivi", appdata);
         CreateDirectoryA(dir, NULL);
         snprintf(out, cap, "%s\\config.ini", dir);
     } else snprintf(out, cap, "config.ini");
 #else
+    char base[512];
+  #ifdef __APPLE__
     const char *home = getenv("HOME");
-    if (home && *home) snprintf(out, cap, "%s/.tivi-config.ini", home);
-    else snprintf(out, cap, "config.ini");
+    if (!home || !*home) { snprintf(out, cap, "config.ini"); return; }
+    snprintf(base, sizeof(base), "%s/Library/Application Support", home);
+  #else
+    const char *xdg  = getenv("XDG_CONFIG_HOME");
+    const char *home = getenv("HOME");
+    if (xdg && *xdg)        snprintf(base, sizeof(base), "%s", xdg);
+    else if (home && *home) snprintf(base, sizeof(base), "%s/.config", home);
+    else { snprintf(out, cap, "config.ini"); return; }
+  #endif
+    char dir[600];
+    snprintf(dir, sizeof(dir), "%s/fezcode", base);      mkdir(dir, 0755);
+    snprintf(dir, sizeof(dir), "%s/fezcode/tivi", base); mkdir(dir, 0755);
+    snprintf(out, cap, "%s/config.ini", dir);
 #endif
 }
 
