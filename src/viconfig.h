@@ -3,7 +3,7 @@
 
 #include <stdbool.h>
 
-// Persisted per-user settings, stored in %APPDATA%\tivi\config.ini.
+// Persisted per-user settings, stored in %APPDATA%\fezcode\tivi\config.ini.
 typedef struct {
     float volume;            // 0..1
     bool  always_on_top;
