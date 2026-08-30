@@ -49,6 +49,11 @@ adjustments, and track switching, wrapped in a borderless, fluid interface.
   order (`E2` before `E10`); toggleable in Settings.
 - **Adjustments and themes** — brightness, contrast, saturation, hue and gamma applied live on
   the GPU; five color themes plus an Adaptive theme that tints the UI from the playing video.
+- **Hisashi menubar** (Windows) — with [Hisashi](https://github.com/fezcode/hisashi) running,
+  tivi gets a macOS-style File / Playback / Audio / Subtitles / Video / Help menu in the bar:
+  every key and panel action, live checkmarks, and the file's audio/subtitle tracks as
+  submenus. Speaks the tiny [hoswl](https://github.com/fezcode/hisashi/blob/main/docs/hoswl-protocol.md)
+  named-pipe protocol; toggle in Settings.
 - **Volume boost** — software amplification up to 200% for quiet media, with a 100% notch on
   the slider.
 - **Native feel** — borderless resizable window, rounded corners and shadow (Win11 DWM /
