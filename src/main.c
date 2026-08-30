@@ -15,6 +15,7 @@
 #include "viconfig.h"
 #include "mediakeys.h"
 #include "singleinst.h"
+#include "menubar.h"
 
 #include <ctype.h>
 #include <math.h>
@@ -23,7 +24,7 @@
 #include <string.h>
 #include <time.h>
 
-#define TIVI_VERSION "0.3.1"
+#define TIVI_VERSION "0.4.0"
 #define SS 2                 // supersample factor — the whole UI is rendered at
                              // SS× and downscaled with bilinear, for smooth AA on
                              // every shape, icon, and glyph (as in Timp).
@@ -615,6 +616,63 @@ static void toggle_maximize(void) {
     }
 }
 
+// ---------- Hisashi menubar (hoswl) ----------
+// tivi has no menu bar of its own; Hisashi's menubar gets one from menubar.c.
+// Item ids are defined there. Runs from the main loop (menubar_frame), so every
+// action below is the same code the keyboard / panels run.
+static void menu_click(const char *id) {
+    bool open = player_is_open(P);
+    int n;
+    g_menu_open = false;
+    #define IS(s) (strcmp(id, s) == 0)
+    if      (IS("file.open"))       open_dialog();
+    else if (IS("file.subs") || IS("sub.load")) {
+        if (open) { char sp[1024]; if (os_open_subtitle_file(sp, sizeof sp)) load_external_subs(sp); }
+    }
+    else if (IS("file.snapshot"))   { if (open) snapshot(); }
+    else if (IS("file.quit"))       g_quit = true;
+    else if (IS("pb.toggle"))       { if (open) { player_toggle(P); g_center_flash = GetTime(); g_center_play = player_is_playing(P); } }
+    else if (IS("pb.stop"))         { if (open) { player_pause(P); player_seek(P, 0); } }
+    else if (IS("pb.prev"))         { if (open) prev_track(); }
+    else if (IS("pb.next"))         next_track();
+    else if (IS("pb.back10"))       { if (open) { player_seek_relative(P, -10); osd("« -10s"); } }
+    else if (IS("pb.fwd10"))        { if (open) { player_seek_relative(P, 10);  osd("» +10s"); } }
+    else if (sscanf(id, "speed.%d", &n) == 1) {
+        static const double pv[6] = { 0.5, 0.75, 1.0, 1.25, 1.5, 2.0 };
+        if (n >= 0 && n < 6) { player_set_speed(P, pv[n]); osd("Speed %.2fx", player_speed(P)); }
+    }
+    else if (IS("speed.pitch"))     { CFG.pitch_correct = !CFG.pitch_correct; player_set_pitch_correct(P, CFG.pitch_correct);
+                                      osd(CFG.pitch_correct ? "Keep pitch on" : "Keep pitch off"); }
+    else if (sscanf(id, "repeat.%d", &n) == 1) {
+        if (n >= 0 && n < 3) { g_repeat = n; playlist_set_loop(&PL, g_repeat == 2);
+                               osd(g_repeat == 0 ? "Repeat off" : g_repeat == 1 ? "Repeat one" : "Repeat all"); }
+    }
+    else if (IS("pb.shuffle"))      playlist_set_shuffle(&PL, !playlist_shuffle(&PL));
+    else if (IS("audio.up"))        set_volume(g_volume + 0.05f);
+    else if (IS("audio.down"))      set_volume(g_volume - 0.05f);
+    else if (IS("audio.mute"))      toggle_mute();
+    else if (sscanf(id, "audio.track.%d", &n) == 1) {
+        if (open && n != player_current_audio(P)) { player_set_audio_track(P, n); osd("Audio track changed"); }
+    }
+    else if (IS("sub.off"))         { g_subs_on = false; g_sub_source = SUB_NONE; subs_clear(SUB); player_set_sub_track(P, -1); osd("Subtitles off"); }
+    else if (sscanf(id, "sub.track.%d", &n) == 1) {
+        if (open) { g_subs_on = true; g_sub_source = SUB_EMBEDDED; g_sub_gen_seen = player_sub_generation(P) - 1;
+                    player_set_sub_track(P, n); osd("Subtitle track changed"); }
+    }
+    else if (IS("video.fullscreen")) toggle_fullscreen();
+    else if (IS("video.aot"))       { g_aot = !g_aot; if (g_aot) SetWindowState(FLAG_WINDOW_TOPMOST); else ClearWindowState(FLAG_WINDOW_TOPMOST);
+                                      osd(g_aot ? "Always on top" : "Always on top off"); }
+    else if (IS("video.hw"))        { CFG.hw_decode = !CFG.hw_decode; player_set_hw_decode(P, CFG.hw_decode); reload_current();
+                                      osd("Hardware decoding %s", CFG.hw_decode ? "On" : "Off"); }
+    else if (IS("video.gpu"))       { CFG.gpu_convert = !CFG.gpu_convert; player_set_gpu_convert(P, CFG.gpu_convert);
+                                      osd("GPU color conversion %s", CFG.gpu_convert ? "On" : "Off"); }
+    else if (IS("video.reset"))     { CFG.brightness = 0; CFG.contrast = 1; CFG.saturation = 1; CFG.hue = 0; CFG.gamma = 1; osd("Adjustments reset"); }
+    else if (IS("video.adjust"))    g_panel = (g_panel == PANEL_ADJUST) ? PANEL_NONE : PANEL_ADJUST;
+    else if (IS("video.playlist"))  g_panel = (g_panel == PANEL_PLAYLIST) ? PANEL_NONE : PANEL_PLAYLIST;
+    else if (IS("video.settings") || IS("help.about")) g_panel = (g_panel == PANEL_SETTINGS) ? PANEL_NONE : PANEL_SETTINGS;
+    #undef IS
+}
+
 // ---------- CLI ----------
 static void print_help(void) {
     printf(
@@ -664,6 +722,8 @@ int main(int argc, char **argv) {
     os_open_files_handler_install();   // Finder "Open With" → the same queue
 
     viconfig_load(&CFG);
+    menubar_init(TIVI_VERSION);
+    menubar_set_enabled(CFG.hisashi_menubar);
     g_volume = CFG.volume; g_aot = CFG.always_on_top; g_subs_on = CFG.subtitles_enabled; g_letterbox_black = CFG.letterbox_black;
     g_click_pause = CFG.click_pause;
     apply_theme(CFG.theme);
@@ -786,6 +846,31 @@ int main(int argc, char **argv) {
             case MK_NEXT:      next_track(); break;
             default: break;
         }
+
+        // ---- Hisashi menubar: publish the current state, run any clicks ----
+        { MenubarState ms = { 0 };
+          ms.open = open; ms.playing = playing;
+          ms.has_next = playlist_has_next(&PL); ms.has_prev = playlist_has_prev(&PL);
+          ms.muted = g_muted; ms.repeat = g_repeat; ms.shuffle = playlist_shuffle(&PL);
+          ms.speed_idx = -1;
+          { static const double pv[6] = { 0.5, 0.75, 1.0, 1.25, 1.5, 2.0 };
+            double sp = player_speed(P);
+            for (int k = 0; k < 6; k++) if (fabs(sp - pv[k]) < 0.011) ms.speed_idx = k; }
+          ms.pitch_correct = CFG.pitch_correct;
+          ms.subs_on = g_subs_on && g_sub_source == SUB_EMBEDDED;
+          ms.cur_audio = open ? player_current_audio(P) : -1;
+          ms.cur_sub = open ? player_current_sub(P) : -1;
+          int nt = open ? player_track_count(P) : 0;
+          for (int i = 0; i < nt && ms.ntracks < MENUBAR_MAX_TRACKS; i++) {
+              const TrackInfo *t = player_track(P, i);
+              if (!t) break;
+              MenubarTrack *mt = &ms.tracks[ms.ntracks++];
+              mt->kind = t->kind; mt->stream_index = t->stream_index;
+              snprintf(mt->title, sizeof mt->title, "%s", t->title);
+          }
+          ms.fullscreen = g_fullscreen; ms.aot = g_aot; ms.hw_decode = CFG.hw_decode; ms.gpu_convert = CFG.gpu_convert;
+          ms.panel = g_panel;
+          menubar_frame(&ms, menu_click); }
 
         // ---- forwarded files from a 2nd launch ----
         { char fwd[4096]; int firstNew = -1, fwdAdded = 0;
@@ -1618,6 +1703,29 @@ int main(int argc, char **argv) {
                     DrawTextEx(fSmall, stat, (Vector2){ px, yy }, 16, 0.2f, alpha(MUT, 200)); yy += 30;
                 }
 
+                // ---- Hisashi (menus in Hisashi's menubar via hoswl) ----
+                DrawLineEx((Vector2){ px, yy }, (Vector2){ px + iw, yy }, 1, alpha(WHITE, 16)); yy += 14;
+                DrawTextEx(fSmall, "HISASHI", (Vector2){ px, yy }, 15, 3.0f, alpha(ACCENT, 200)); yy += 26;
+                {
+                    Rectangle row = { px - 6, yy - 6, iw + 12, 46 };
+                    bool hov = inview && CheckCollisionPointRec(mp, row);
+                    if (hov) DrawRectangleRounded(row, 0.3f, 6, alpha(WHITE, 10));
+                    DrawTextEx(fSmall, "Hisashi menubar", (Vector2){ px, yy + 6 }, 20, 0.3f, TXT);
+                    float tx = panelR.x + panelR.width - 76;
+                    bool on = CFG.hisashi_menubar;
+                    DrawRectangleRounded((Rectangle){ tx, yy, 54, 28 }, 1, 8, on ? ACCENT : TRK);
+                    scircle(on ? tx + 39 : tx + 15, yy + 14, 11, on ? BG1 : alpha(TXT, 210));
+                    if (hov && IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) {
+                        CFG.hisashi_menubar = !CFG.hisashi_menubar; menubar_set_enabled(CFG.hisashi_menubar);
+                        osd("Hisashi menubar %s", CFG.hisashi_menubar ? "on" : "off");
+                        consumed = true;
+                    }
+                    yy += 50;
+                    const char *status = !CFG.hisashi_menubar ? "off" : menubar_connected() ? "connected" : "waiting for Hisashi";
+                    char stat[96]; snprintf(stat, sizeof stat, "File / Playback / Audio / Subtitles / Video in the bar  \xc2\xb7  %s", status);
+                    DrawTextEx(fSmall, stat, (Vector2){ px, yy }, 16, 0.2f, alpha(MUT, 200)); yy += 30;
+                }
+
                 // ---- Subtitles (font styling for plain-text subs) ----
                 DrawLineEx((Vector2){ px, yy }, (Vector2){ px + iw, yy }, 1, alpha(WHITE, 16)); yy += 14;
                 DrawTextEx(fSmall, "SUBTITLES", (Vector2){ px, yy }, 15, 3.0f, alpha(ACCENT, 200)); yy += 26;
@@ -1849,6 +1957,7 @@ int main(int argc, char **argv) {
     if (g_fullscreen) { CFG.win_x = g_fs_x; CFG.win_y = g_fs_y; CFG.win_w = g_fs_w; CFG.win_h = g_fs_h; CFG.has_win = true; }   // pre-fullscreen geometry, not the monitor cover
     else if (!g_maximized && !os_is_zoomed(GetWindowHandle())) { Vector2 wp = GetWindowPosition(); CFG.win_x = (int)wp.x; CFG.win_y = (int)wp.y; CFG.win_w = GetScreenWidth(); CFG.win_h = GetScreenHeight(); CFG.has_win = true; }
     viconfig_save(&CFG);
+    menubar_shutdown();   // "bye" to Hisashi before the (slow) FFmpeg teardown
 
     // TIVI_PERF: shutdown stage markers — the exit path has been seen hanging
     // (zombie process, decode threads spinning); this pinpoints the stage.

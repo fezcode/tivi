@@ -16,7 +16,7 @@ LIBS="$(pkg-config --libs $PKGS) -framework OpenGL -lm -lpthread \
       -framework Cocoa -framework MediaPlayer -framework UniformTypeIdentifiers"
 
 mkdir -p build
-SRCS="main player audio_out subs playlist mediakeys singleinst osvideo viconfig yuvtex"
+SRCS="main player audio_out subs playlist mediakeys singleinst osvideo viconfig yuvtex menubar"
 OBJC_SRCS="osvideo_mac mediakeys_mac"
 
 OBJS=""

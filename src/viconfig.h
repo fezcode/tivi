@@ -26,6 +26,8 @@ typedef struct {
     bool  hw_decode;         // true = auto D3D11VA GPU decode (+fallback); false = force software
     bool  gpu_convert;       // true = shader YUV->RGB; false = force CPU sws_scale
 
+    bool  hisashi_menubar;   // publish the menus to Hisashi's menubar (hoswl); harmless without Hisashi
+
     // Subtitle font styling (applied to plain-text subs only; ASS/SSA keep their own).
     char     sub_font[64];       // family name, default "sans-serif"
     float    sub_font_scale;     // 0.25..2.5 (1 = default)

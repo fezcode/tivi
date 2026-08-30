@@ -79,6 +79,7 @@ void viconfig_defaults(ViConfig *c) {
     c->gamma      = 1.0f;
     c->hw_decode   = true;
     c->gpu_convert = true;
+    c->hisashi_menubar = true;
     snprintf(c->sub_font, sizeof(c->sub_font), "%s", "sans-serif");
     c->sub_font_scale    = 1.0f;
     c->sub_color         = 0xFFFFFF;   // white
@@ -116,6 +117,7 @@ static bool parse_file(ViConfig *c, const char *path) {
             else if (!strcmp(key, "theme"))             c->theme = iv;
             else if (!strcmp(key, "hw_decode"))         c->hw_decode = iv != 0;
             else if (!strcmp(key, "gpu_convert"))       c->gpu_convert = iv != 0;
+            else if (!strcmp(key, "hisashi_menubar"))   c->hisashi_menubar = iv != 0;
             else if (!strcmp(key, "win_x")) { c->win_x = iv; c->has_win = true; }
             else if (!strcmp(key, "win_y"))  c->win_y = iv;
             else if (!strcmp(key, "win_w"))  c->win_w = iv;
