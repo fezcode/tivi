@@ -18,7 +18,8 @@ default_dir = "${PROGRAMFILES}/tivi"
 # Settings live in %APPDATA%\fezcode\tivi (outside the install dir), so uninstall
 # never touches them. config.ini kept for any 0.2.1 portable leftover.
 [uninstall]
-keep = ["config.ini"]
+keep          = ["config.ini"]
+settings_dirs = ["${APPDATA}/fezcode/tivi"]     # config.ini lives here; offered as "Also remove my settings and data"
 
 [[steps]]
 type  = "welcome"
