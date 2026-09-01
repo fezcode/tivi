@@ -24,7 +24,7 @@
 #include <string.h>
 #include <time.h>
 
-#define TIVI_VERSION "0.4.0"
+#define TIVI_VERSION "0.4.1"
 #define SS 2                 // supersample factor — the whole UI is rendered at
                              // SS× and downscaled with bilinear, for smooth AA on
                              // every shape, icon, and glyph (as in Timp).
