@@ -178,3 +178,10 @@ assets/tivi.ico embedded Windows executable icon (assets/tivi-icon.svg is the so
   [durian.blender.org](https://durian.blender.org/), CC-BY 3.0.
 
 All code written for this project is released into the public domain.
+
+## Application icon
+
+The editable icon design lives in `tools/make-icon.py`. Run
+`python tools/make-icon.py` with Python, Pillow and a C compiler (`gcc`, or set
+`CC`) to regenerate the SVG, PNG and multi-resolution Windows ICO assets.
+The same generated C renderer supplies the runtime window icon, with no external image dependency.

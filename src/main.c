@@ -4,6 +4,7 @@
 // auto-hiding controls, video adjustments, and VLC-style track/subtitle/playlist
 // handling.
 #include "raylib.h"
+#include "icon.h"
 #include "rlgl.h"
 
 #include "player.h"
@@ -42,9 +43,6 @@ static const Theme THEMES[] = {
 };
 #define NTHEMES ((int)(sizeof(THEMES) / sizeof(THEMES[0])))
 static int g_theme = 0;
-static bool g_icon_dirty = false;   // re-tint the app icon at the top of the next
-                                    // frame — NEVER inside the render (set_app_icon
-                                    // uses a texture mode, which cannot nest)
 
 // "Adaptive" pseudo-theme (index NTHEMES): the palette drifts toward tints derived
 // from the average color of the playing video. Targets are recomputed from a sparse
@@ -65,7 +63,6 @@ static void apply_theme(int idx) {
     const Theme *t = &THEMES[(idx < NTHEMES) ? idx : 0];   // adaptive seeds from Gold
     BG0 = t->bg0; BG1 = t->bg1; TXT = t->txt; MUT = t->mut; TRK = t->trk; ACCENT = t->accent;
     g_ad_have = false;
-    g_icon_dirty = true;
 }
 
 // Derive the adaptive palette targets from the frame's average color.
@@ -81,23 +78,21 @@ static void adaptive_targets(float r, float g, float b) {
     g_ad_have = true;
 }
 
-// app/taskbar icon — the retro-TV mark from assets/tivi-icon.svg, tinted with the
-// theme accent so the window icon follows the palette (re-tinted on theme change)
+// The app identity stays consistent when the interface theme changes.
 static void set_app_icon(void) {
-    RenderTexture2D it = LoadRenderTexture(64, 64);
-    BeginTextureMode(it); ClearBackground(BLANK);
-    Color dark = { 16, 13, 9, 255 };
-    DrawRectangleRounded((Rectangle){ 2, 2, 60, 60 }, 0.34f, 16, dark);
-    DrawLineEx((Vector2){ 27, 26 }, (Vector2){ 19, 12 }, 3.0f, ACCENT);   // antennae
-    DrawLineEx((Vector2){ 37, 26 }, (Vector2){ 45, 12 }, 3.0f, ACCENT);
-    DrawCircleV((Vector2){ 19, 12 }, 2.8f, ACCENT);
-    DrawCircleV((Vector2){ 45, 12 }, 2.8f, ACCENT);
-    DrawRectangleRounded((Rectangle){ 10, 25, 44, 32 }, 0.35f, 12, ACCENT);   // body
-    DrawRectangleRounded((Rectangle){ 15, 30, 34, 22 }, 0.40f, 12, dark);     // screen
-    DrawTriangle((Vector2){ 28, 35 }, (Vector2){ 28, 47 }, (Vector2){ 38, 41 }, ACCENT);
-    EndTextureMode();
-    Image ico = LoadImageFromTexture(it.texture); ImageFlipVertical(&ico);
-    SetWindowIcon(ico); UnloadImage(ico); UnloadRenderTexture(it);
+    // Match the executable icon at title-bar, taskbar and Alt-Tab sizes.
+    {
+        static const int sizes[] = { 16, 24, 32, 48, 64 };
+        Image icons[sizeof(sizes) / sizeof(sizes[0])];
+        const int count = (int)(sizeof(sizes) / sizeof(sizes[0]));
+        for (int i = 0; i < count; i++) {
+            icons[i] = (Image){ MemAlloc(sizes[i] * sizes[i] * 4), sizes[i], sizes[i],
+                                1, PIXELFORMAT_UNCOMPRESSED_R8G8B8A8 };
+            icon_render_rgba(icons[i].data, sizes[i]);
+        }
+        SetWindowIcons(icons, count);
+        for (int i = 0; i < count; i++) UnloadImage(icons[i]);
+    }
 }
 
 // ---------- fonts ----------
@@ -750,7 +745,7 @@ int main(int argc, char **argv) {
     if (CFG.has_win) SetWindowPosition(CFG.win_x, CFG.win_y);
     if (g_aot) SetWindowState(FLAG_WINDOW_TOPMOST);
 
-    set_app_icon(); g_icon_dirty = false;
+    set_app_icon();
 
     // fonts (loaded at 2x for crisp downscaled text) with Latin + Turkish coverage
     static int cps[640]; int cpc = 0;
@@ -819,7 +814,6 @@ int main(int argc, char **argv) {
         bool open = player_is_open(P);
         bool playing = open && player_is_playing(P);
 
-        if (g_icon_dirty) { set_app_icon(); g_icon_dirty = false; }   // theme changed last frame
 
         // adaptive theme: ease the live palette toward the sampled targets
         if (g_theme == NTHEMES && g_ad_have) {
