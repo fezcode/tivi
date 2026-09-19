@@ -17,7 +17,7 @@
 // (0.2.1 briefly wrote next to the exe; load still merges such a file back once
 // and deletes it, so nothing set under 0.2.1 is lost.)
 
-static void cfg_path(char *out, int cap) {
+void viconfig_dir(char *out, int cap) {
 #ifdef _WIN32
     const char *appdata = getenv("APPDATA");
     if (appdata && *appdata) {
@@ -26,24 +26,33 @@ static void cfg_path(char *out, int cap) {
         CreateDirectoryA(dir, NULL);                 // parent first — no mkdir -p on Win32
         snprintf(dir, sizeof(dir), "%s\\fezcode\\tivi", appdata);
         CreateDirectoryA(dir, NULL);
-        snprintf(out, cap, "%s\\config.ini", dir);
-    } else snprintf(out, cap, "config.ini");
+        snprintf(out, cap, "%s", dir);
+    } else snprintf(out, cap, ".");
 #else
     char base[512];
   #ifdef __APPLE__
     const char *home = getenv("HOME");
-    if (!home || !*home) { snprintf(out, cap, "config.ini"); return; }
+    if (!home || !*home) { snprintf(out, cap, "."); return; }
     snprintf(base, sizeof(base), "%s/Library/Application Support", home);
   #else
     const char *xdg  = getenv("XDG_CONFIG_HOME");
     const char *home = getenv("HOME");
     if (xdg && *xdg)        snprintf(base, sizeof(base), "%s", xdg);
     else if (home && *home) snprintf(base, sizeof(base), "%s/.config", home);
-    else { snprintf(out, cap, "config.ini"); return; }
+    else { snprintf(out, cap, "."); return; }
   #endif
     char dir[600];
     snprintf(dir, sizeof(dir), "%s/fezcode", base);      mkdir(dir, 0755);
     snprintf(dir, sizeof(dir), "%s/fezcode/tivi", base); mkdir(dir, 0755);
+    snprintf(out, cap, "%s", dir);
+#endif
+}
+
+static void cfg_path(char *out, int cap) {
+    char dir[560]; viconfig_dir(dir, sizeof(dir));
+#ifdef _WIN32
+    snprintf(out, cap, "%s\\config.ini", dir);
+#else
     snprintf(out, cap, "%s/config.ini", dir);
 #endif
 }
@@ -80,6 +89,9 @@ void viconfig_defaults(ViConfig *c) {
     c->hw_decode   = true;
     c->gpu_convert = true;
     c->hisashi_menubar = true;
+    c->resume_playback = true;
+    c->sub_auto        = true;
+    c->sub_auto_lang[0] = 0;       // no preference — take whatever sits next to the video
     snprintf(c->sub_font, sizeof(c->sub_font), "%s", "sans-serif");
     c->sub_font_scale    = 1.0f;
     c->sub_color         = 0xFFFFFF;   // white
@@ -118,6 +130,8 @@ static bool parse_file(ViConfig *c, const char *path) {
             else if (!strcmp(key, "hw_decode"))         c->hw_decode = iv != 0;
             else if (!strcmp(key, "gpu_convert"))       c->gpu_convert = iv != 0;
             else if (!strcmp(key, "hisashi_menubar"))   c->hisashi_menubar = iv != 0;
+            else if (!strcmp(key, "resume_playback"))   c->resume_playback = iv != 0;
+            else if (!strcmp(key, "sub_auto"))          c->sub_auto = iv != 0;
             else if (!strcmp(key, "win_x")) { c->win_x = iv; c->has_win = true; }
             else if (!strcmp(key, "win_y"))  c->win_y = iv;
             else if (!strcmp(key, "win_w"))  c->win_w = iv;
@@ -128,7 +142,12 @@ static bool parse_file(ViConfig *c, const char *path) {
             else if (!strcmp(key, "sub_outline_color")) c->sub_outline_color = uv & 0xFFFFFF;
         }
         if (sscanf(line, " %63[^= ] = %63[^\r\n]", key, sv) == 2) {
-            if (!strcmp(key, "sub_font")) snprintf(c->sub_font, sizeof(c->sub_font), "%s", sv);
+            if      (!strcmp(key, "sub_font"))      snprintf(c->sub_font, sizeof(c->sub_font), "%s", sv);
+            else if (!strcmp(key, "sub_auto_lang")) {   // a tag, not a sentence — clip it
+                size_t n = strlen(sv);
+                if (n >= sizeof(c->sub_auto_lang)) n = sizeof(c->sub_auto_lang) - 1;
+                memcpy(c->sub_auto_lang, sv, n); c->sub_auto_lang[n] = 0;
+            }
         }
     }
     fclose(f);
@@ -167,6 +186,10 @@ bool viconfig_save(const ViConfig *c) {
     fprintf(f, "gamma=%.3f\n",      c->gamma);
     fprintf(f, "hw_decode=%d\n",    c->hw_decode ? 1 : 0);
     fprintf(f, "gpu_convert=%d\n",  c->gpu_convert ? 1 : 0);
+    fprintf(f, "hisashi_menubar=%d\n", c->hisashi_menubar ? 1 : 0);
+    fprintf(f, "resume_playback=%d\n", c->resume_playback ? 1 : 0);
+    fprintf(f, "sub_auto=%d\n",        c->sub_auto ? 1 : 0);
+    fprintf(f, "sub_auto_lang=%s\n",   c->sub_auto_lang);
     fprintf(f, "sub_font=%s\n",         c->sub_font);
     fprintf(f, "sub_font_scale=%.3f\n", c->sub_font_scale);
     fprintf(f, "sub_color=%06x\n",         c->sub_color & 0xFFFFFF);

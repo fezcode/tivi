@@ -33,6 +33,7 @@ typedef struct {
     int  speed_idx;        // index into the 0.5/0.75/1/1.25/1.5/2 presets, -1 = none
     bool pitch_correct;
     bool subs_on;          // an embedded track is showing (sub_source == SUB_EMBEDDED)
+    int  sub_delay_ms;     // subtitle nudge, + = subtitles appear later
     int  cur_audio, cur_sub;   // stream indices, -1 = none
     int  ntracks;
     MenubarTrack tracks[MENUBAR_MAX_TRACKS];

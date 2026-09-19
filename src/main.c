@@ -17,6 +17,7 @@
 #include "mediakeys.h"
 #include "singleinst.h"
 #include "menubar.h"
+#include "watch.h"
 
 #include <ctype.h>
 #include <math.h>
@@ -25,7 +26,7 @@
 #include <string.h>
 #include <time.h>
 
-#define TIVI_VERSION "0.4.1"
+#define TIVI_VERSION "0.5.0"
 #define SS 2                 // supersample factor — the whole UI is rendered at
                              // SS× and downscaled with bilinear, for smooth AA on
                              // every shape, icon, and glyph (as in Timp).
@@ -146,6 +147,26 @@ static void fmt_time(double s, char *buf, int cap) {
     int t = (int)s, h = t / 3600, m = (t % 3600) / 60, sec = t % 60;
     if (h > 0) snprintf(buf, cap, "%d:%02d:%02d", h, m, sec);
     else       snprintf(buf, cap, "%d:%02d", m, sec);
+}
+
+// "Label            [<]  value  [>]" — the right-aligned stepper used by the
+// subtitle settings. Returns -1 / +1 on a click this frame, else 0; the caller
+// owns the step so it can pick its own increment.
+static int stepper_row(const char *label, const char *value, const char *dec, const char *inc,
+                       Rectangle panel, float px, float yy, Vector2 mp, bool active) {
+    DrawTextEx(fSmall, label, (Vector2){ px, yy + 4 }, 20, 0.3f, TXT);
+    float bw = 168, bx = panel.x + panel.width - 22 - bw;
+    Rectangle lb = { bx, yy, 26, 28 }, rb = { bx + bw - 26, yy, 26, 28 };
+    bool hl = active && CheckCollisionPointRec(mp, lb), hr = active && CheckCollisionPointRec(mp, rb);
+    DrawRectangleRounded(lb, 0.4f, 6, hl ? alpha(WHITE, 24) : TRK);
+    DrawRectangleRounded(rb, 0.4f, 6, hr ? alpha(WHITE, 24) : TRK);
+    Vector2 dm = MeasureTextEx(fSmall, dec, 20, 0), im = MeasureTextEx(fSmall, inc, 20, 0);
+    DrawTextEx(fSmall, dec, (Vector2){ lb.x + (26 - dm.x) / 2, yy + 4 }, 20, 0, TXT);
+    DrawTextEx(fSmall, inc, (Vector2){ rb.x + (26 - im.x) / 2, yy + 4 }, 20, 0, TXT);
+    Vector2 nm = MeasureTextEx(fSmall, value, 16, 0.2f);
+    DrawTextEx(fSmall, value, (Vector2){ bx + 26 + (bw - 52 - nm.x) / 2, yy + 6 }, 16, 0.2f, ACCENT);
+    if (IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) { if (hl) return -1; if (hr) return 1; }
+    return 0;
 }
 
 static void draw_fit(Font f, const char *txt, Vector2 pos, float size, float sp, Color c, float maxw) {
@@ -303,6 +324,15 @@ static int      g_sub_source = SUB_NONE;
 static unsigned g_sub_gen_seen = 0;
 static bool     g_subs_on = true;
 static char     g_ext_sub_name[256] = "";   // filename of the loaded external subtitle
+// Per-file subtitle nudge, + = subtitles appear later. Belongs to the release,
+// not the session, so it is remembered per file (watch.h).
+static int      g_sub_delay_ms = 0;
+#define SUB_DELAY_MAX 600000                // ±10 min — past that it is a different file
+
+// Resume: only offer to pick a file back up when there is something to pick up,
+// and never within the closing minute (that is the credits, not the film).
+#define RESUME_MIN   30.0
+#define RESUME_TAIL  60.0
 
 static bool g_click_pause = true;   // single click on the video toggles play/pause
 
@@ -405,18 +435,27 @@ static bool cur_sub_is_ass(void) {
     return false;
 }
 
-static void load_external_subs(const char *path) {
+static void load_external_subs_ex(const char *path, bool auto_found) {
     if (player_video_width(P) > 0) subs_set_size(SUB, player_video_width(P), player_video_height(P));
-    player_set_sub_track(P, -1);
-    if (subs_load_file(SUB, path)) {
-        g_sub_source = SUB_EXTERNAL; g_subs_on = true;
-        const char *e = GetFileExtension(path);
-        bool styled = e && (!strcmp(e, ".ass") || !strcmp(e, ".ssa"));
-        subs_set_plaintext(SUB, !styled);
-        snprintf(g_ext_sub_name, sizeof g_ext_sub_name, "%s", GetFileName(path)); osd("Subtitles: %s", GetFileName(path));
+    if (!subs_load_file(SUB, path)) {
+        // Never trade a working embedded track for a broken sidecar: leave the
+        // selection alone and rebuild the track subs_load_file may have dropped.
+        if (g_sub_source == SUB_EMBEDDED) g_sub_gen_seen = player_sub_generation(P) - 1;
+        if (!auto_found) osd("Could not load subtitles");
+        return;
     }
-    else osd("Could not load subtitles");
+    player_set_sub_track(P, -1);
+    g_sub_source = SUB_EXTERNAL; g_subs_on = true;
+    const char *e = GetFileExtension(path);
+    bool styled = e && (!strcmp(e, ".ass") || !strcmp(e, ".ssa"));
+    subs_set_plaintext(SUB, !styled);
+    snprintf(g_ext_sub_name, sizeof g_ext_sub_name, "%s", GetFileName(path));
+    // A manual load answers a click, so it speaks in the OSD; a file we found by
+    // ourselves is news, and shares the top-right lane with "Added N files".
+    if (auto_found) note("Subtitles: %s", GetFileName(path));
+    else            osd("Subtitles: %s", GetFileName(path));
 }
+static void load_external_subs(const char *path) { load_external_subs_ex(path, false); }
 
 static void apply_adjustments_uniforms(void) {
     SetShaderValue(adjShader, locBright,   &CFG.brightness, SHADER_UNIFORM_FLOAT);
@@ -426,17 +465,161 @@ static void apply_adjustments_uniforms(void) {
     SetShaderValue(adjShader, locGamma,    &CFG.gamma,      SHADER_UNIFORM_FLOAT);
 }
 
+// ---------- subtitle delay ----------
+static void set_sub_delay(int ms) {
+    g_sub_delay_ms = (ms >  SUB_DELAY_MAX) ?  SUB_DELAY_MAX :
+                     (ms < -SUB_DELAY_MAX) ? -SUB_DELAY_MAX : ms;
+    osd("Subtitle delay %s%d ms", g_sub_delay_ms > 0 ? "+" : "", g_sub_delay_ms);
+}
+
+// ---------- sidecar subtitles (movie.mkv → movie.srt / movie.en.srt) ----------
+// A downloaded subtitle lands next to the video; tivi used to ignore it until
+// it was dragged in. On open we scan the folder for files sharing the video's
+// stem and take the best one: the preferred language first, then a plain
+// `movie.srt`, then any other tag — forced/SDH variants last, since they are
+// rarely what someone means by "the subtitles".
+static int natcmp(const char *a, const char *b);   // defined with auto-queue below
+
+// ISO 639-1 / 639-2 / English-name aliases for the languages the picker offers.
+static const struct { const char *code, *alt3, *name; } SUB_LANGS[] = {
+    { "en", "eng", "English" },    { "tr", "tur", "Turkish" }, { "de", "ger", "German" },
+    { "fr", "fre", "French" },     { "es", "spa", "Spanish" },  { "it", "ita", "Italian" },
+    { "pt", "por", "Portuguese" }, { "ru", "rus", "Russian" },  { "ja", "jpn", "Japanese" },
+};
+#define NSUBLANGS ((int)(sizeof(SUB_LANGS) / sizeof(SUB_LANGS[0])))
+
+static bool ci_eq(const char *a, const char *b) {
+    for (;; a++, b++) {
+        int ca = tolower((unsigned char)*a), cb = tolower((unsigned char)*b);
+        if (ca != cb) return false;
+        if (!ca) return true;
+    }
+}
+static bool ci_eq_len(const char *a, size_t n, const char *b) {   // a[0..n) vs all of b
+    for (size_t i = 0; i < n; i++)
+        if (!b[i] || tolower((unsigned char)a[i]) != tolower((unsigned char)b[i])) return false;
+    return b[n] == 0;
+}
+static bool ci_find_n(const char *hay, size_t n, const char *needle) {
+    size_t m = strlen(needle);
+    for (size_t i = 0; m <= n && i + m <= n; i++) {
+        size_t k = 0;
+        while (k < m && tolower((unsigned char)hay[i + k]) == tolower((unsigned char)needle[k])) k++;
+        if (k == m) return true;
+    }
+    return false;
+}
+
+// Does any dot-separated segment of the tag name this language? ("en", "eng",
+// "English" all match "en", so "movie.English.forced.srt" is found.)
+static bool tag_names_lang(const char *tag, size_t tlen, const char *lang) {
+    if (!lang || !*lang) return false;
+    const char *alt3 = NULL, *name = NULL;
+    for (int i = 0; i < NSUBLANGS; i++)
+        if (ci_eq(SUB_LANGS[i].code, lang)) { alt3 = SUB_LANGS[i].alt3; name = SUB_LANGS[i].name; break; }
+    const char *s = tag, *end = tag + tlen;
+    while (s < end) {
+        const char *d = s; while (d < end && *d != '.') d++;
+        size_t n = (size_t)(d - s);
+        if (ci_eq_len(s, n, lang)) return true;
+        if (alt3 && ci_eq_len(s, n, alt3)) return true;
+        if (name && ci_eq_len(s, n, name)) return true;
+        s = (d < end) ? d + 1 : end;
+    }
+    return false;
+}
+
+typedef struct {
+    const char *stem; size_t stemlen;
+    const char *lang;
+    char best[1024], best_name[288];
+    int  best_score;
+} Sidecar;
+
+static void sidecar_probe(const char *path, void *ud) {
+    Sidecar *sc = (Sidecar *)ud;
+    if (!is_sub_ext(path)) return;
+    const char *name = GetFileName(path);
+    for (size_t i = 0; i < sc->stemlen; i++)
+        if (!name[i] || tolower((unsigned char)name[i]) != tolower((unsigned char)sc->stem[i])) return;
+    if (name[sc->stemlen] != '.') return;
+    const char *rest = name + sc->stemlen + 1;      // "srt" | "en.srt" | "en.forced.srt"
+    const char *lastdot = NULL;
+    for (const char *p = rest; *p; p++) if (*p == '.') lastdot = p;
+    size_t tlen = lastdot ? (size_t)(lastdot - rest) : 0;   // the tag; 0 when there is none
+    int score;
+    if      (tlen && tag_names_lang(rest, tlen, sc->lang)) score = 0;   // the language asked for
+    else if (!tlen)                                        score = 1;   // plain movie.srt
+    else if (!sc->lang || !*sc->lang)                      score = 2;   // no preference, any tag
+    else                                                   score = 3;   // some other language
+    if (tlen && (ci_find_n(rest, tlen, "forced") || ci_find_n(rest, tlen, "sdh"))) score += 4;
+    if (score > sc->best_score) return;
+    if (score == sc->best_score && sc->best[0] && natcmp(name, sc->best_name) >= 0) return;
+    snprintf(sc->best, sizeof sc->best, "%s", path);
+    snprintf(sc->best_name, sizeof sc->best_name, "%s", name);
+    sc->best_score = score;
+}
+
+static void autoload_sidecar_subs(const char *video) {
+    if (!CFG.sub_auto || !g_subs_on || !video || !*video) return;
+    char dir[1024]; snprintf(dir, sizeof dir, "%s", video);
+    char *slash = NULL;
+    for (char *p = dir; *p; p++) if (*p == '/' || *p == '\\') slash = p;
+    if (!slash)            snprintf(dir, sizeof dir, ".");   // bare name → current directory
+    else if (slash == dir) dir[1] = 0;                       // file at the filesystem root
+    else                   *slash = 0;
+    char stem[512]; snprintf(stem, sizeof stem, "%s", GetFileName(video));
+    char *dot = NULL;
+    for (char *p = stem; *p; p++) if (*p == '.') dot = p;
+    if (dot) *dot = 0;
+    if (!stem[0]) return;
+    Sidecar sc = { 0 };
+    sc.stem = stem; sc.stemlen = strlen(stem); sc.lang = CFG.sub_auto_lang; sc.best_score = 9999;
+    os_scan_dir_files(dir, sidecar_probe, &sc);
+    if (sc.best[0]) load_external_subs_ex(sc.best, true);
+}
+
 // ---------- open a file ----------
-static void load_file(const char *path) {
+// Note where we are in the file that is still open, so reopening it later picks
+// up here. A file watched to the end is forgotten instead — resuming at the
+// credits is worse than starting over.
+static void remember_current(void) {
+    if (!player_is_open(P)) return;
+    const char *path = player_path(P);
+    if (!path || !*path) return;
+    double pos = player_position(P), dur = player_duration(P);
+    bool finished = player_eof(P) || (dur > 0 && pos >= dur - 10.0);
+    WatchEntry e = { finished ? 0.0 : pos, dur, g_sub_delay_ms };
+    if (e.position < 5.0 && e.sub_delay_ms == 0) watch_forget(path);
+    else watch_put(path, &e);
+}
+
+static void load_file_ex(const char *path, bool allow_resume) {
     if (!path) return;
+    remember_current();                    // the outgoing file keeps its place
     if (!player_open(P, path)) { osd("Can't open: %s", player_error(P)); return; }
     if (player_has_video(P)) ensure_vtex(player_video_width(P), player_video_height(P));
     player_set_volume(P, g_muted ? 0.0f : g_volume);
     player_set_speed(P, 1.0);
     apply_subtitles_for_new_file();
+
+    WatchEntry we;
+    bool known = watch_get(path, &we);
+    g_sub_delay_ms = known ? we.sub_delay_ms : 0;   // the nudge belongs to this file
+    autoload_sidecar_subs(path);
+
     player_play(P);
+    if (allow_resume && CFG.resume_playback && known && we.position > RESUME_MIN) {
+        double dur = player_duration(P);
+        if (dur <= 0 || we.position < dur - RESUME_TAIL) {
+            player_seek(P, we.position);
+            char t[16]; fmt_time(we.position, t, sizeof t);
+            osd("Resumed at %s", t);   // the top-right lane belongs to the queue toasts
+        }
+    }
     g_last_activity = GetTime();
 }
+static void load_file(const char *path) { load_file_ex(path, true); }
 
 // Reopen the current file in place (used when a setting like hardware decoding
 // only takes effect at decoder-open time), preserving position, speed and state.
@@ -445,7 +628,7 @@ static void reload_current(void) {
     char path[1024]; snprintf(path, sizeof path, "%s", player_path(P));
     double pos = player_position(P), spd = player_speed(P);
     bool was_playing = player_is_playing(P);
-    load_file(path);
+    load_file_ex(path, false);   // the seek below is the resume, to the live position
     player_set_speed(P, spd);
     if (pos > 0) player_seek(P, pos);
     if (!was_playing) player_pause(P);
@@ -654,6 +837,9 @@ static void menu_click(const char *id) {
         if (open) { g_subs_on = true; g_sub_source = SUB_EMBEDDED; g_sub_gen_seen = player_sub_generation(P) - 1;
                     player_set_sub_track(P, n); osd("Subtitle track changed"); }
     }
+    else if (IS("sub.delay.dec"))   set_sub_delay(g_sub_delay_ms - 50);
+    else if (IS("sub.delay.inc"))   set_sub_delay(g_sub_delay_ms + 50);
+    else if (IS("sub.delay.reset")) set_sub_delay(0);
     else if (IS("video.fullscreen")) toggle_fullscreen();
     else if (IS("video.aot"))       { g_aot = !g_aot; if (g_aot) SetWindowState(FLAG_WINDOW_TOPMOST); else ClearWindowState(FLAG_WINDOW_TOPMOST);
                                       osd(g_aot ? "Always on top" : "Always on top off"); }
@@ -683,10 +869,14 @@ static void print_help(void) {
 "  Up / Down        Volume up / down             M              Mute\n"
 "  N / B            Next / previous in playlist   S              Snapshot (PNG)\n"
 "  C                Cycle subtitle track          X              Cycle audio track\n"
+"  , / .            Subtitles earlier / later    /              Reset subtitle delay\n"
+"                   (hold Shift for 500 ms steps)\n"
 "  [ / ] or - / +   Slower / faster   \\           Reset speed\n"
 "  Right-click      Context menu\n"
 "  Q  Playlist   A  Adjustments   G  Settings     T  Always on top   Esc  Back\n\n"
-"Drag & drop files onto the window to enqueue them. Media keys are supported.\n",
+"Drag & drop files onto the window to enqueue them. Media keys are supported.\n"
+"Files resume where you left off, and a matching subtitle file next to the video\n"
+"(movie.srt, movie.en.srt) loads by itself — both toggle off in Settings.\n",
         TIVI_VERSION);
 }
 // ---------- main ----------
@@ -717,6 +907,7 @@ int main(int argc, char **argv) {
     os_open_files_handler_install();   // Finder "Open With" → the same queue
 
     viconfig_load(&CFG);
+    watch_load();
     menubar_init(TIVI_VERSION);
     menubar_set_enabled(CFG.hisashi_menubar);
     g_volume = CFG.volume; g_aot = CFG.always_on_top; g_subs_on = CFG.subtitles_enabled; g_letterbox_black = CFG.letterbox_black;
@@ -798,6 +989,7 @@ int main(int argc, char **argv) {
         int sf = atoi(getenv("TIVI_SHOT"));           // TIVI_SHOT=<frame> picks the moment; else ~2s in
         shot_frame = (sf > 1) ? sf : 120;
         if (getenv("TIVI_SHOT_PLAYLIST"))    g_panel = PANEL_PLAYLIST;       // panel choice for the shot
+        else if (getenv("TIVI_SHOT_SUBS"))   g_panel = PANEL_SUBS;
         else if (!getenv("TIVI_SHOT_PLAIN")) g_panel = PANEL_SETTINGS;       // PLAIN=1 → playback view, no panel
         if (getenv("TIVI_SHOT_SCROLL")) g_set_scroll = (float)atoi(getenv("TIVI_SHOT_SCROLL")); }
 
@@ -852,6 +1044,7 @@ int main(int argc, char **argv) {
             for (int k = 0; k < 6; k++) if (fabs(sp - pv[k]) < 0.011) ms.speed_idx = k; }
           ms.pitch_correct = CFG.pitch_correct;
           ms.subs_on = g_subs_on && g_sub_source == SUB_EMBEDDED;
+          ms.sub_delay_ms = g_sub_delay_ms;
           ms.cur_audio = open ? player_current_audio(P) : -1;
           ms.cur_sub = open ? player_current_sub(P) : -1;
           int nt = open ? player_track_count(P) : 0;
@@ -1124,6 +1317,12 @@ int main(int argc, char **argv) {
         if (IsKeyPressed(KEY_LEFT_BRACKET)  || IsKeyPressed(KEY_MINUS) || IsKeyPressed(KEY_KP_SUBTRACT)) { player_set_speed(P, player_speed(P) - 0.1); osd("Speed %.2fx", player_speed(P)); }
         if (IsKeyPressed(KEY_RIGHT_BRACKET) || IsKeyPressed(KEY_EQUAL) || IsKeyPressed(KEY_KP_ADD))      { player_set_speed(P, player_speed(P) + 0.1); osd("Speed %.2fx", player_speed(P)); }
         if (IsKeyPressed(KEY_BACKSLASH))     { player_set_speed(P, 1.0); osd("Speed 1.00x"); }
+        {   // subtitle delay: , / . nudge by 50 ms (500 ms with Shift), / resets
+            int step = (IsKeyDown(KEY_LEFT_SHIFT) || IsKeyDown(KEY_RIGHT_SHIFT)) ? 500 : 50;
+            if (IsKeyPressed(KEY_COMMA))  set_sub_delay(g_sub_delay_ms - step);
+            if (IsKeyPressed(KEY_PERIOD)) set_sub_delay(g_sub_delay_ms + step);
+            if (IsKeyPressed(KEY_SLASH))  set_sub_delay(0);
+        }
         if (IsKeyPressed(KEY_R)) { g_repeat = (g_repeat + 1) % 3; playlist_set_loop(&PL, g_repeat == 2); osd(g_repeat==0?"Repeat off":g_repeat==1?"Repeat one":"Repeat all"); }
         if (IsKeyPressed(KEY_C)) {  // cycle subtitle track
             int n = player_track_count(P), cur = player_current_sub(P), found = -1, first = -1;
@@ -1280,7 +1479,10 @@ int main(int argc, char **argv) {
                     // crisp AA like VLC instead of a stretched low-res bitmap.
                     subs_set_size(SUB, (int)vr.width, (int)vr.height);
                     uint8_t *sr; int sw, sh; bool sch;
-                    if (subs_render(SUB, (long long)(player_position(P) * 1000.0), &sr, &sw, &sh, &sch)) {
+                    // A positive delay shows subtitles later, i.e. renders the line
+                    // that belongs to an earlier moment in the file.
+                    long long snow = (long long)(player_position(P) * 1000.0) - g_sub_delay_ms;
+                    if (subs_render(SUB, snow, &sr, &sw, &sh, &sch)) {
                         ensure_stex(sw, sh); if (sch) UpdateTexture(stex, sr);
                         DrawTexturePro(stex, (Rectangle){ 0, 0, (float)sw, (float)sh }, svr, (Vector2){ 0, 0 }, 0, WHITE);
                     }
@@ -1424,7 +1626,8 @@ int main(int argc, char **argv) {
                     if (hov && IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) {
                         if (CheckCollisionPointRec(mp, xR)) {
                             bool removedCur = playlist_remove(&PL, i);
-                            if (removedCur) { const char *p2 = playlist_current(&PL); if (p2) load_file(p2); else player_close(P); }
+                            if (removedCur) { const char *p2 = playlist_current(&PL);
+                                              if (p2) load_file(p2); else { remember_current(); player_close(P); } }
                         } else { g_q_press = i; g_q_press_y = mp.y; g_q_press_t = now; }
                         consumed = true;
                     }
@@ -1477,6 +1680,15 @@ int main(int argc, char **argv) {
                         draw_fit(fSmall, lab, (Vector2){ px, py + 13 }, 20, 0.2f, xsel ? ACCENT : alpha(TXT, 220), iw);
                         if (hov3 && IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) { g_subs_on = true; consumed = true; }
                         py += rowH;
+                    }
+                    // delay nudge, right where someone notices the subs are off
+                    {
+                        char dv[24]; snprintf(dv, sizeof dv, "%s%d ms", g_sub_delay_ms > 0 ? "+" : "", g_sub_delay_ms);
+                        int dstep = stepper_row("Delay", dv, "-", "+", panelR, px, py + 4, mp, true);
+                        if (dstep) { set_sub_delay(g_sub_delay_ms + dstep * 50); consumed = true; }
+                        py += 38;
+                        DrawTextEx(fSmall, "Keys  ,  and  .   ·   /  resets", (Vector2){ px, py }, 15, 0.2f, alpha(MUT, 170));
+                        py += 24;
                     }
                     py += 6;
                 }
@@ -1535,7 +1747,10 @@ int main(int argc, char **argv) {
                 float viewH = panelR.y + panelR.height - 10 - viewTop;
                 Rectangle viewR = { panelR.x, viewTop, panelR.width, viewH };
                 bool inview = CheckCollisionPointRec(mp, viewR);
-                static float set_content_h = 999;   // measured last frame
+                // Measured last frame. The seed is deliberately larger than any
+                // real panel: on frame 1 it only feeds the clamp below, and a low
+                // guess there pins TIVI_SHOT_SCROLL to the top of the panel.
+                static float set_content_h = 4000;
                 float maxScroll = set_content_h - viewH; if (maxScroll < 0) maxScroll = 0;
                 if (g_set_scroll > maxScroll) g_set_scroll = maxScroll;
                 if (g_set_scroll < 0) g_set_scroll = 0;
@@ -1543,9 +1758,11 @@ int main(int argc, char **argv) {
                 float yy = viewTop + 6 - g_set_scroll;
 
                 // toggles
-                const char *labels[6] = { "Always on top", "Black letterbox", "Shuffle", "Click video to pause", "Auto-queue folder", "Pin controls" };
-                bool st[6] = { g_aot, g_letterbox_black, playlist_shuffle(&PL), g_click_pause, CFG.auto_queue, CFG.pin_controls };
-                for (int i = 0; i < 6; i++) {
+                const char *labels[7] = { "Always on top", "Black letterbox", "Shuffle", "Click video to pause",
+                                          "Auto-queue folder", "Resume playback", "Pin controls" };
+                bool st[7] = { g_aot, g_letterbox_black, playlist_shuffle(&PL), g_click_pause,
+                               CFG.auto_queue, CFG.resume_playback, CFG.pin_controls };
+                for (int i = 0; i < 7; i++) {
                     Rectangle row = { px - 6, yy - 6, iw + 12, 46 };
                     bool hov = inview && CheckCollisionPointRec(mp, row);
                     if (hov) DrawRectangleRounded(row, 0.3f, 6, alpha(WHITE, 10));
@@ -1559,6 +1776,8 @@ int main(int argc, char **argv) {
                         else if (i == 2) playlist_set_shuffle(&PL, !playlist_shuffle(&PL));
                         else if (i == 3) g_click_pause = !g_click_pause;
                         else if (i == 4) { CFG.auto_queue = !CFG.auto_queue; osd("Auto-queue folder %s", CFG.auto_queue ? "on" : "off"); }
+                        else if (i == 5) { CFG.resume_playback = !CFG.resume_playback;
+                                           osd(CFG.resume_playback ? "Resume where you left off" : "Always start from the beginning"); }
                         else { CFG.pin_controls = !CFG.pin_controls; osd(CFG.pin_controls ? "Controls pinned" : "Controls auto-hide"); }
                         consumed = true;
                     }
@@ -1724,6 +1943,50 @@ int main(int argc, char **argv) {
                 DrawLineEx((Vector2){ px, yy }, (Vector2){ px + iw, yy }, 1, alpha(WHITE, 16)); yy += 14;
                 DrawTextEx(fSmall, "SUBTITLES", (Vector2){ px, yy }, 15, 3.0f, alpha(ACCENT, 200)); yy += 26;
                 {
+                    // delay — the control most often reached for, so it leads the
+                    // section. Remembered per file, so a badly synced release stays
+                    // fixed the next time it is opened.
+                    char dv[24]; snprintf(dv, sizeof dv, "%s%d ms", g_sub_delay_ms > 0 ? "+" : "", g_sub_delay_ms);
+                    int dstep = stepper_row("Delay", dv, "-", "+", panelR, px, yy, mp, inview);
+                    if (dstep) { set_sub_delay(g_sub_delay_ms + dstep * 50); consumed = true; }
+                    yy += 34;
+                    DrawTextEx(fSmall, "Keys  ,  and  .   ·   Shift for 500 ms   ·   /  resets",
+                               (Vector2){ px, yy }, 15, 0.2f, alpha(MUT, 170));
+                    yy += 28;
+
+                    // sidecar auto-load — movie.mkv picks up movie.srt / movie.en.srt
+                    {
+                        Rectangle row = { px - 6, yy - 6, iw + 12, 46 };
+                        bool hov = inview && CheckCollisionPointRec(mp, row);
+                        if (hov) DrawRectangleRounded(row, 0.3f, 6, alpha(WHITE, 10));
+                        DrawTextEx(fSmall, "Auto-load subtitle file", (Vector2){ px, yy + 6 }, 20, 0.3f, TXT);
+                        float tx = panelR.x + panelR.width - 76;
+                        DrawRectangleRounded((Rectangle){ tx, yy, 54, 28 }, 1, 8, CFG.sub_auto ? ACCENT : TRK);
+                        scircle(CFG.sub_auto ? tx + 39 : tx + 15, yy + 14, 11, CFG.sub_auto ? BG1 : alpha(TXT, 210));
+                        if (hov && IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) {
+                            CFG.sub_auto = !CFG.sub_auto;
+                            osd("Auto-load subtitle file %s", CFG.sub_auto ? "on" : "off");
+                            consumed = true;
+                        }
+                        yy += 50;
+                    }
+
+                    // preferred language for that pick: "Any" plus the common tags
+                    {
+                        int li = 0;   // 0 = no preference, otherwise SUB_LANGS index + 1
+                        for (int k = 0; k < NSUBLANGS; k++)
+                            if (ci_eq(SUB_LANGS[k].code, CFG.sub_auto_lang)) { li = k + 1; break; }
+                        const char *lv = (li == 0) ? "Any language" : SUB_LANGS[li - 1].name;
+                        int st2 = stepper_row("Preferred language", lv, "<", ">", panelR, px, yy, mp, inview);
+                        if (st2) {
+                            li = (li + st2 + NSUBLANGS + 1) % (NSUBLANGS + 1);
+                            if (li == 0) CFG.sub_auto_lang[0] = 0;
+                            else snprintf(CFG.sub_auto_lang, sizeof CFG.sub_auto_lang, "%s", SUB_LANGS[li - 1].code);
+                            consumed = true;
+                        }
+                        yy += 44;
+                    }
+
                     // font family stepper: < Name > — names must resolve through the
                     // platform's libass font provider (DirectWrite / CoreText)
 #ifdef __APPLE__
@@ -1829,7 +2092,8 @@ int main(int argc, char **argv) {
                 DrawTextEx(fSmall, "A resizable, FFmpeg-powered video player.", (Vector2){ px, yy }, 17, 0.2f, MUT); yy += 24;
                 DrawTextEx(fSmall, "FFmpeg · libass · raylib  —  public domain", (Vector2){ px, yy }, 17, 0.2f, MUT); yy += 30;
                 DrawTextEx(fSmall, "Space play · J/L seek · F fullscreen · S snapshot", (Vector2){ px, yy }, 15, 0.2f, alpha(MUT, 170)); yy += 22;
-                DrawTextEx(fSmall, "C subtitles · X audio · Q playlist · [ ] \\ speed", (Vector2){ px, yy }, 15, 0.2f, alpha(MUT, 170)); yy += 24;
+                DrawTextEx(fSmall, "C subtitles · X audio · Q playlist · [ ] \\ speed", (Vector2){ px, yy }, 15, 0.2f, alpha(MUT, 170)); yy += 22;
+                DrawTextEx(fSmall, ", . subtitle delay · / reset delay · R repeat", (Vector2){ px, yy }, 15, 0.2f, alpha(MUT, 170)); yy += 24;
 
                 EndScissorMode();
                 set_content_h = (yy + g_set_scroll) - viewTop;
@@ -1902,6 +2166,15 @@ int main(int argc, char **argv) {
             }
         }
 
+        // ---- per-file playback memory ----
+        // Same reasoning as the settings autosave: note the position as we go, so
+        // a kill or a power cut still leaves the episode resumable. The store is
+        // only written when something actually moved.
+        {
+            static double last_watch = 0;
+            if (now - last_watch > 5.0) { last_watch = now; remember_current(); watch_save(); }
+        }
+
         frame++;
         if (shot_frame > 0) g_last_activity = GetTime();   // keep controls visible for the shot
         if (shot_frame > 0 && frame == shot_frame) TakeScreenshot("tivi_shot.png");
@@ -1951,6 +2224,7 @@ int main(int argc, char **argv) {
     if (g_fullscreen) { CFG.win_x = g_fs_x; CFG.win_y = g_fs_y; CFG.win_w = g_fs_w; CFG.win_h = g_fs_h; CFG.has_win = true; }   // pre-fullscreen geometry, not the monitor cover
     else if (!g_maximized && !os_is_zoomed(GetWindowHandle())) { Vector2 wp = GetWindowPosition(); CFG.win_x = (int)wp.x; CFG.win_y = (int)wp.y; CFG.win_w = GetScreenWidth(); CFG.win_h = GetScreenHeight(); CFG.has_win = true; }
     viconfig_save(&CFG);
+    remember_current(); watch_save();   // last position before the player goes away
     menubar_shutdown();   // "bye" to Hisashi before the (slow) FFmpeg teardown
 
     // TIVI_PERF: shutdown stage markers — the exit path has been seen hanging
@@ -1966,6 +2240,7 @@ int main(int argc, char **argv) {
     XSTAGE("close_audio");      CloseAudioDevice();
     XSTAGE("close_window");     CloseWindow();
     XSTAGE("playlist");         playlist_free(&PL);
+    XSTAGE("watch");            watch_free();
     XSTAGE("done");
 #undef XSTAGE
     return 0;

@@ -41,6 +41,13 @@ adjustments, and track switching, wrapped in a borderless, fluid interface.
   image subs (PGS / VOBSUB / DVB), full ASS/SSA styling. Rasterized at display resolution for
   crisp anti-aliasing, with font, size, color, outline and shadow options for plain-text subs —
   authored ASS styling is respected.
+- **Subtitles that find themselves** — open `movie.mkv` and `movie.srt` or `movie.en.srt` next
+  to it loads with it, preferring the language you set (forced/SDH variants come last). Out of
+  sync? Nudge with `,` / `.` — 50 ms a tap, 500 ms with Shift, `/` to reset — and the offset is
+  remembered for that file, because bad timing belongs to the release, not the session.
+- **Picks up where you left off** — close an episode mid-scene and it reopens there, with a
+  "Resumed at 24:31" note. Files watched to the end are forgotten, so finishing one starts the
+  next from the top. Toggleable in Settings.
 - **Pitch-preserving speed** — 0.25–2× playback with VLC-style time-stretch, so voices stay
   natural at 1.5×; the classic pitch-shifting mode is a toggle away.
 - **Precise seeking** — arrow-key seeks land exactly on target even on WEB-DLs with 10–20 s
@@ -85,7 +92,8 @@ Settings live in `%APPDATA%\tivi` (macOS: `~/.tivi-config.ini`) and survive unin
 ## Usage
 
 - **Open**: drag files or folders onto the window, click the **`+`** button, or press `O`.
-- **Subtitles**: drag a subtitle file onto the window, or CC panel › *Load subtitle file…*
+- **Subtitles**: a matching file next to the video loads by itself; otherwise drag one onto the
+  window, or CC panel › *Load subtitle file…*  The CC panel also holds the delay nudge.
 - **Resize**: drag any window edge or corner. **Move**: drag the top bar.
 - **Click** the video to play/pause, **double-click** for fullscreen, **right-click** for the
   context menu.
@@ -97,6 +105,7 @@ Settings live in `%APPDATA%\tivi` (macOS: `~/.tivi-config.ini`) and survive unin
 | ↑ / ↓ | Volume up / down | `M` | Mute |
 | `N` / `B` | Next / previous | `S` | Snapshot |
 | `C` | Cycle subtitle track | `X` | Cycle audio track |
+| `,` / `.` | Subtitles earlier / later | `/` | Reset subtitle delay |
 | `[` / `]` or `-` / `+` | Slower / faster | `\` | Reset speed |
 | `Q` | Playlist panel | `A` | Adjustments panel |
 | `G` | Settings panel | `T` | Always on top |
@@ -137,8 +146,12 @@ sh build-macos.sh
 
 `config.ini` lives in `%APPDATA%\tivi\` (macOS: `~/.tivi-config.ini`). Settings autosave as you change them — a crash or
 kill can't lose them. Persisted: volume, always-on-top, theme, subtitle settings, hardware
-decode / GPU conversion toggles, auto-queue, pinned controls, keep-pitch, the five video
-adjustments, and window geometry.
+decode / GPU conversion toggles, auto-queue, resume, subtitle auto-load and its preferred
+language, pinned controls, keep-pitch, the five video adjustments, and window geometry.
+
+`history.ini` sits beside it and holds the per-file memory — resume position and subtitle
+delay for the last few hundred files, written as you watch. Delete it to forget everything;
+turning *Resume playback* off in Settings stops it being used.
 
 ## Command line
 
@@ -162,6 +175,7 @@ src/
   osvideo.c     native dialogs, DWM corners/shadow, UTF-8 args, dir scan, console (Windows)
   osvideo_mac.m NSOpenPanel dialogs, corners/shadow, work area, Finder "Open With" (macOS)
   viconfig.c    persistent settings (%APPDATA% / ~/.tivi-config.ini)
+  watch.c       per-file memory — resume position + subtitle delay (history.ini)
   mediakeys.c   system-wide media-key hotkeys (Windows)
   mediakeys_mac.m media keys via MPRemoteCommandCenter (macOS)
   singleinst.c  single-instance (forward files to the running window) — Win32 mutex / Unix socket

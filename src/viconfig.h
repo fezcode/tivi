@@ -28,6 +28,12 @@ typedef struct {
 
     bool  hisashi_menubar;   // publish the menus to Hisashi's menubar (hoswl); harmless without Hisashi
 
+    bool  resume_playback;   // reopen a file where it was left off (see watch.h)
+
+    // Sidecar subtitles: movie.mkv picks up movie.srt / movie.en.srt on open.
+    bool  sub_auto;              // look for a matching subtitle file next to the video
+    char  sub_auto_lang[8];      // preferred language tag ("" = take whatever is there)
+
     // Subtitle font styling (applied to plain-text subs only; ASS/SSA keep their own).
     char     sub_font[64];       // family name, default "sans-serif"
     float    sub_font_scale;     // 0.25..2.5 (1 = default)
@@ -43,5 +49,11 @@ typedef struct {
 void viconfig_defaults(ViConfig *c);
 bool viconfig_load(ViConfig *c);
 bool viconfig_save(const ViConfig *c);
+
+// The config home, created on demand and written without a trailing separator:
+// %APPDATA%\fezcode\tivi, macOS ~/Library/Application Support/fezcode/tivi,
+// other Unix $XDG_CONFIG_HOME/fezcode/tivi. "." when no home is known.
+// Shared with watch.c, which keeps history.ini alongside config.ini.
+void viconfig_dir(char *out, int cap);
 
 #endif

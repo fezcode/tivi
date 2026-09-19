@@ -130,6 +130,11 @@ int menubar_build_text(const MenubarState *s, char *text, size_t cap) {
     }
     PUT(" -\n");
     PUT(" sub.load|Load Subtitle File…||%s\n", need);
+    PUT(" -\n");
+    PUT(" sub.delay.cur|Delay: %s%d ms||d\n", s->sub_delay_ms > 0 ? "+" : "", s->sub_delay_ms);
+    PUT(" sub.delay.dec|Subtitles Earlier (-50 ms)|,\n");
+    PUT(" sub.delay.inc|Subtitles Later (+50 ms)|.\n");
+    PUT(" sub.delay.reset|Reset Delay|/\n");
 
     PUT("Video\n");
     PUT(" video.fullscreen|Full Screen|F|%s\n", RADIO(s->fullscreen));
