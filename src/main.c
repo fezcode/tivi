@@ -26,7 +26,7 @@
 #include <string.h>
 #include <time.h>
 
-#define TIVI_VERSION "0.5.0"
+#define TIVI_VERSION "0.5.1"
 #define SS 2                 // supersample factor — the whole UI is rendered at
                              // SS× and downscaled with bilinear, for smooth AA on
                              // every shape, icon, and glyph (as in Timp).
@@ -147,6 +147,35 @@ static void fmt_time(double s, char *buf, int cap) {
     int t = (int)s, h = t / 3600, m = (t % 3600) / 60, sec = t % 60;
     if (h > 0) snprintf(buf, cap, "%d:%02d:%02d", h, m, sec);
     else       snprintf(buf, cap, "%d:%02d", m, sec);
+}
+
+// ---------- scrollable panel viewport ----------
+// A panel taller than the window has to scroll, or its last rows are simply
+// unreachable. The pattern: clamp the offset against the height measured last
+// frame, clip drawing to the viewport, draw shifted by the offset, then measure
+// and report the content height back. The playlist keeps its own row-based
+// scrolling; everything else goes through here.
+typedef struct { Rectangle view; float top; bool inview; } PanelView;
+
+static PanelView panel_scroll_begin(Rectangle panel, float py, Vector2 mp, float *scroll, float content_h) {
+    PanelView v;
+    v.top  = py - 6;
+    v.view = (Rectangle){ panel.x, v.top, panel.width, panel.y + panel.height - 10 - v.top };
+    float maxScroll = content_h - v.view.height; if (maxScroll < 0) maxScroll = 0;
+    if (*scroll > maxScroll) *scroll = maxScroll;
+    if (*scroll < 0) *scroll = 0;
+    v.inview = CheckCollisionPointRec(mp, v.view);
+    BeginScissorMode((int)(v.view.x * SS), (int)(v.view.y * SS), (int)(v.view.width * SS), (int)(v.view.height * SS));
+    return v;
+}
+
+static void panel_scroll_end(PanelView v, Rectangle panel, float scroll, float content_h) {
+    EndScissorMode();
+    if (content_h <= v.view.height) return;              // nothing hidden, no bar
+    float maxScroll = content_h - v.view.height;
+    float th = v.view.height * v.view.height / content_h;
+    float ty = v.top + (maxScroll > 0 ? (v.view.height - th) * (scroll / maxScroll) : 0);
+    DrawRectangleRounded((Rectangle){ panel.x + panel.width - 5, ty, 3, th }, 1, 4, alpha(ACCENT, 130));
 }
 
 // "Label            [<]  value  [>]" — the right-aligned stepper used by the
@@ -343,6 +372,7 @@ static int g_panel = PANEL_NONE;
 // playlist panel interaction (reorder / remove / scroll)
 static int    g_pl_scroll = 0;
 static float  g_set_scroll = 0;     // settings panel scroll (px)
+static float  g_pnl_scroll = 0;     // subtitles / audio / adjustments scroll (px)
 static int    g_q_press = -1, g_q_drag = -1, g_q_target = -1;
 static float  g_q_press_y = 0;
 static double g_q_press_t = 0;
@@ -990,8 +1020,10 @@ int main(int argc, char **argv) {
         shot_frame = (sf > 1) ? sf : 120;
         if (getenv("TIVI_SHOT_PLAYLIST"))    g_panel = PANEL_PLAYLIST;       // panel choice for the shot
         else if (getenv("TIVI_SHOT_SUBS"))   g_panel = PANEL_SUBS;
+        else if (getenv("TIVI_SHOT_AUDIO"))  g_panel = PANEL_AUDIO;
+        else if (getenv("TIVI_SHOT_ADJUST")) g_panel = PANEL_ADJUST;
         else if (!getenv("TIVI_SHOT_PLAIN")) g_panel = PANEL_SETTINGS;       // PLAIN=1 → playback view, no panel
-        if (getenv("TIVI_SHOT_SCROLL")) g_set_scroll = (float)atoi(getenv("TIVI_SHOT_SCROLL")); }
+        if (getenv("TIVI_SHOT_SCROLL")) g_set_scroll = g_pnl_scroll = (float)atoi(getenv("TIVI_SHOT_SCROLL")); }
 
     // Supersampled render target: the whole UI is drawn at SS× then downscaled with
     // bilinear filtering, giving smooth anti-aliasing on every shape, icon and glyph.
@@ -1274,6 +1306,12 @@ int main(int argc, char **argv) {
         }
         if (vol_drag) { if (IsMouseButtonDown(MOUSE_BUTTON_LEFT)) g_volume = 2.0f * clampf((mp.x - volR.x) / volR.width, 0, 1), g_muted = false, player_set_volume(P, g_volume); else vol_drag = false; }
 
+        // A freshly opened panel starts at the top; the previous panel's scroll
+        // offset means nothing here.
+        { static int last_panel = -1;                     // -1 = first frame, nothing to reset
+          if (last_panel < 0) last_panel = g_panel;
+          else if (g_panel != last_panel) { last_panel = g_panel; g_pnl_scroll = 0; } }
+
         // panel interactions (handled in draw section via helper) — compute panel rect
         Rectangle panelR = { 0 };
         if (g_panel != PANEL_NONE) {
@@ -1289,12 +1327,16 @@ int main(int argc, char **argv) {
             else { last_click_t = now; if (open && g_click_pause) { player_toggle(P); g_center_flash = now; g_center_play = player_is_playing(P); } }
         }
 
-        // wheel = volume
+        // Wheel scrolls whichever panel is under the cursor, and changes the
+        // volume everywhere else. Every panel scrolls: the wheel falling through
+        // to the volume over a track list was how its last tracks stayed hidden.
         float wheel = GetMouseWheelMove();
         if (wheel != 0) {
-            if (g_panel == PANEL_PLAYLIST && CheckCollisionPointRec(mp, panelR)) g_pl_scroll -= (int)wheel;
-            else if (g_panel == PANEL_SETTINGS && CheckCollisionPointRec(mp, panelR)) g_set_scroll -= wheel * 36;
-            else set_volume(g_volume + wheel * 0.05f);
+            bool over_panel = g_panel != PANEL_NONE && CheckCollisionPointRec(mp, panelR);
+            if      (!over_panel)                set_volume(g_volume + wheel * 0.05f);
+            else if (g_panel == PANEL_PLAYLIST)  g_pl_scroll  -= (int)wheel;
+            else if (g_panel == PANEL_SETTINGS)  g_set_scroll -= wheel * 36;
+            else                                 g_pnl_scroll -= wheel * 36;
         }
 
         // ---- keyboard ----
@@ -1656,16 +1698,20 @@ int main(int argc, char **argv) {
                 }
             } else if (g_panel == PANEL_AUDIO || g_panel == PANEL_SUBS) {
                 int kind = (g_panel == PANEL_AUDIO) ? TRACK_AUDIO : TRACK_SUBTITLE;
+                // A release with a dozen subtitle tracks overflows the panel; scroll it.
+                static float trk_content_h = 4000;   // measured last frame (see panel_scroll_begin)
+                PanelView pv = panel_scroll_begin(panelR, py, mp, &g_pnl_scroll, trk_content_h);
+                py = pv.top + 6 - g_pnl_scroll;
                 if (g_panel == PANEL_SUBS) {
                     bool offsel = (!g_subs_on || g_sub_source == SUB_NONE);
                     Rectangle row = { px - 6, py, iw + 12, rowH - 4 };
-                    bool hov = CheckCollisionPointRec(mp, row);
+                    bool hov = pv.inview && CheckCollisionPointRec(mp, row);
                     if (offsel) DrawRectangleRounded(row, 0.4f, 6, alpha(ACCENT, 34)); else if (hov) DrawRectangleRounded(row, 0.4f, 6, alpha(WHITE, 12));
                     DrawTextEx(fSmall, "Disable subtitles", (Vector2){ px, py + 13 }, 20, 0.2f, offsel ? ACCENT : TXT);
                     if (hov && IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) { g_subs_on = false; g_sub_source = SUB_NONE; subs_clear(SUB); player_set_sub_track(P, -1); consumed = true; }
                     py += rowH;
                     Rectangle row2 = { px - 6, py, iw + 12, rowH - 4 };
-                    bool hov2 = CheckCollisionPointRec(mp, row2);
+                    bool hov2 = pv.inview && CheckCollisionPointRec(mp, row2);
                     if (hov2) DrawRectangleRounded(row2, 0.4f, 6, alpha(WHITE, 12));
                     DrawTextEx(fSmall, "Load subtitle file…", (Vector2){ px, py + 13 }, 20, 0.2f, TXT);
                     if (hov2 && IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) { char sp[1024]; if (os_open_subtitle_file(sp, sizeof sp)) load_external_subs(sp); consumed = true; }
@@ -1674,7 +1720,7 @@ int main(int argc, char **argv) {
                     if (g_sub_source == SUB_EXTERNAL) {
                         bool xsel = g_subs_on;
                         Rectangle row3 = { px - 6, py, iw + 12, rowH - 4 };
-                        bool hov3 = CheckCollisionPointRec(mp, row3);
+                        bool hov3 = pv.inview && CheckCollisionPointRec(mp, row3);
                         if (xsel) DrawRectangleRounded(row3, 0.4f, 6, alpha(ACCENT, 34)); else if (hov3) DrawRectangleRounded(row3, 0.4f, 6, alpha(WHITE, 12));
                         char lab[300]; snprintf(lab, sizeof lab, "External:  %s", g_ext_sub_name);
                         draw_fit(fSmall, lab, (Vector2){ px, py + 13 }, 20, 0.2f, xsel ? ACCENT : alpha(TXT, 220), iw);
@@ -1684,7 +1730,7 @@ int main(int argc, char **argv) {
                     // delay nudge, right where someone notices the subs are off
                     {
                         char dv[24]; snprintf(dv, sizeof dv, "%s%d ms", g_sub_delay_ms > 0 ? "+" : "", g_sub_delay_ms);
-                        int dstep = stepper_row("Delay", dv, "-", "+", panelR, px, py + 4, mp, true);
+                        int dstep = stepper_row("Delay", dv, "-", "+", panelR, px, py + 4, mp, pv.inview);
                         if (dstep) { set_sub_delay(g_sub_delay_ms + dstep * 50); consumed = true; }
                         py += 38;
                         DrawTextEx(fSmall, "Keys  ,  and  .   ·   /  resets", (Vector2){ px, py }, 15, 0.2f, alpha(MUT, 170));
@@ -1695,12 +1741,12 @@ int main(int argc, char **argv) {
                 int n = player_track_count(P);
                 int cur = (kind == TRACK_AUDIO) ? player_current_audio(P) : player_current_sub(P);
                 bool any = false;
-                for (int i = 0; i < n && py < panelR.y + panelR.height - rowH; i++) {
+                for (int i = 0; i < n; i++) {        // the scissor clips; no row is skipped
                     const TrackInfo *tr = player_track(P, i);
                     if (tr->kind != kind) continue;
                     any = true;
                     Rectangle row = { px - 6, py, iw + 12, rowH - 4 };
-                    bool hov = CheckCollisionPointRec(mp, row);
+                    bool hov = pv.inview && CheckCollisionPointRec(mp, row);
                     bool sel = (tr->stream_index == cur) && (kind == TRACK_AUDIO || (g_subs_on && g_sub_source == SUB_EMBEDDED));
                     if (sel) DrawRectangleRounded(row, 0.4f, 6, alpha(ACCENT, 34)); else if (hov) DrawRectangleRounded(row, 0.4f, 6, alpha(WHITE, 12));
                     draw_fit(fSmall, tr->title, (Vector2){ px, py + 13 }, 20, 0.2f, sel ? ACCENT : alpha(TXT, 220), iw);
@@ -1711,7 +1757,9 @@ int main(int argc, char **argv) {
                     }
                     py += rowH;
                 }
-                if (!any) DrawTextEx(fSmall, kind == TRACK_AUDIO ? "No audio tracks" : "No embedded subtitles", (Vector2){ px, py + 8 }, 20, 0.2f, MUT);
+                if (!any) { DrawTextEx(fSmall, kind == TRACK_AUDIO ? "No audio tracks" : "No embedded subtitles", (Vector2){ px, py + 8 }, 20, 0.2f, MUT); py += 34; }
+                trk_content_h = (py + g_pnl_scroll) - pv.top;
+                panel_scroll_end(pv, panelR, g_pnl_scroll, trk_content_h);
             } else if (g_panel == PANEL_ADJUST) {
                 struct { const char *name; float *v; float lo, hi, def; } sl[] = {
                     { "Brightness", &CFG.brightness, -1, 1, 0 },
@@ -1720,6 +1768,10 @@ int main(int argc, char **argv) {
                     { "Hue",        &CFG.hue,      -180, 180, 0 },
                     { "Gamma",      &CFG.gamma,     0.2f, 3, 1 },
                 };
+                // Five sliders plus Reset overflow a short window — scroll it too.
+                static float adj_content_h = 4000;   // measured last frame
+                PanelView pv = panel_scroll_begin(panelR, py, mp, &g_pnl_scroll, adj_content_h);
+                py = pv.top + 6 - g_pnl_scroll;
                 for (int i = 0; i < 5; i++) {
                     float yy = py + i * 60;
                     DrawTextEx(fSmall, sl[i].name, (Vector2){ px, yy }, 19, 0.3f, TXT);
@@ -1733,14 +1785,16 @@ int main(int argc, char **argv) {
                     float hx = tr.x + tr.width * frac;
                     scircle(hx, tr.y + 3, 8, TXT);
                     Rectangle hit = { tr.x - 4, tr.y - 11, tr.width + 8, 28 };
-                    if (CheckCollisionPointRec(mp, hit) && IsMouseButtonDown(MOUSE_BUTTON_LEFT)) { *sl[i].v = sl[i].lo + clampf((mp.x - tr.x) / tr.width, 0, 1) * (sl[i].hi - sl[i].lo); consumed = true; }
+                    if (pv.inview && CheckCollisionPointRec(mp, hit) && IsMouseButtonDown(MOUSE_BUTTON_LEFT)) { *sl[i].v = sl[i].lo + clampf((mp.x - tr.x) / tr.width, 0, 1) * (sl[i].hi - sl[i].lo); consumed = true; }
                 }
                 float ry = py + 5 * 60 + 8;
                 Rectangle resetR = { px, ry, 104, 34 };
-                bool rh = CheckCollisionPointRec(mp, resetR);
+                bool rh = pv.inview && CheckCollisionPointRec(mp, resetR);
                 DrawRectangleRoundedLines(resetR, 0.4f, 8, rh ? ACCENT : alpha(MUT, 150));
                 DrawTextEx(fSmall, "Reset", (Vector2){ resetR.x + 28, resetR.y + 8 }, 18, 0.3f, rh ? ACCENT : MUT);
                 if (rh && IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) { CFG.brightness = 0; CFG.contrast = 1; CFG.saturation = 1; CFG.hue = 0; CFG.gamma = 1; consumed = true; }
+                adj_content_h = (ry + 34 + g_pnl_scroll) - pv.top;
+                panel_scroll_end(pv, panelR, g_pnl_scroll, adj_content_h);
             } else if (g_panel == PANEL_SETTINGS) {
                 // Scrollable: small windows can't fit all settings + about.
                 float viewTop = py - 6;
