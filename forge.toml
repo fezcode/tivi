@@ -1,6 +1,6 @@
 [app]
 name    = "tivi"
-version = "0.5.1"
+version = "0.5.2"
 id      = "io.tivi.tivi"
 icon    = "assets/tivi.ico"
 
