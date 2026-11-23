@@ -16,9 +16,9 @@ window_title = "tivi Setup"
 default_dir = "${PROGRAMFILES}/tivi"
 
 # Settings live in %APPDATA%\fezcode\tivi (outside the install dir), so uninstall
-# never touches them. config.ini kept for any 0.2.1 portable leftover.
+# never touches them. (A 0.2.1 config.ini next to the exe is merged into
+# %APPDATA% and deleted by the app itself on first launch.)
 [uninstall]
-keep          = ["config.ini"]
 settings_dirs = ["${APPDATA}/fezcode/tivi"]     # config.ini lives here; offered as "Also remove my settings and data"
 
 [[steps]]
@@ -91,4 +91,4 @@ data  = "${INSTALLDIR}"
 hive  = "HKLM"
 key   = "Software\\tivi\\tivi"
 value = "Version"
-data  = "0.4.1"
+data  = "${app.version}"

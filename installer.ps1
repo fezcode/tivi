@@ -13,8 +13,7 @@ Set-Location $PSScriptRoot
 
 $forgeRoot   = Resolve-Path $ForgeDir
 $forgeGui    = Join-Path $forgeRoot "build\forge.exe"
-$forgeSrc    = Join-Path $forgeRoot "cmd\forge"
-$uninstaller = Join-Path $forgeRoot "build\uninstall.exe"
+$uninstaller = Join-Path $forgeRoot "build\stub.exe"
 $stageDir    = Join-Path $PSScriptRoot "dist\win-x64"
 $outDir      = Join-Path $PSScriptRoot "dist\installer"
 
@@ -31,22 +30,13 @@ if (-not (Test-Path (Join-Path $stageDir "tivi.exe"))) { throw "Missing dist\win
 Write-Host "`n[2/4] Payload staged in $stageDir" -ForegroundColor Cyan
 Write-Host ("  {0} files" -f (Get-ChildItem $stageDir).Count) -ForegroundColor DarkGray
 
-Write-Host "`n[3/4] Ensuring GUI-subsystem forge.exe..." -ForegroundColor Cyan
-if (-not (Test-Path $uninstaller)) { throw "Missing $uninstaller. Run 'gobake build' in $forgeRoot first." }
-$needBuild = -not (Test-Path $forgeGui)
-if (-not $needBuild) {
-    $srcLatest = (Get-ChildItem $forgeSrc -Recurse -Filter *.go | Sort-Object LastWriteTime -Descending | Select-Object -First 1).LastWriteTime
-    if ((Get-Item $forgeGui).LastWriteTime -lt $srcLatest) { $needBuild = $true }
+Write-Host "`n[3/4] Checking prebuilt Forge 2..." -ForegroundColor Cyan
+foreach ($relative in @('build/forge.exe', 'build/stub.exe', 'build/wizard/Forge.Wizard.exe', 'build/wizard/libSkiaSharp.dll', 'build/wizard/libHarfBuzzSharp.dll')) {
+    $required = Join-Path $forgeRoot $relative
+    if (-not (Test-Path -LiteralPath $required)) { throw "Missing $required. Run 'gobake build' in $forgeRoot first." }
 }
-if ($needBuild) {
-    Push-Location $forgeRoot
-    try {
-        go build -tags "desktop,production" -ldflags "-H windowsgui -X main.Version=local-gui" -o build\forge.exe ./cmd/forge/
-        if ($LASTEXITCODE -ne 0) { throw "go build forge.exe failed (exit $LASTEXITCODE)" }
-    } finally { Pop-Location }
-} else {
-    Write-Host "  up to date: $forgeGui" -ForegroundColor DarkGray
-}
+$forgeVersion = & $forgeGui --version
+if ($LASTEXITCODE -ne 0 -or $forgeVersion -notmatch '^forge v2\.') { throw 'Forge 2 is required. Rebuild the sibling Forge toolkit.' }
 
 Write-Host "`n[4/4] Building Setup.exe..." -ForegroundColor Cyan
 function Invoke-Forge {
