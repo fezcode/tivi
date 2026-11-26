@@ -9,7 +9,7 @@ publisher = "Şamil Bülbül (Fezcode)"
 comments  = "Small, native video player that plays everything"
 
 [ui]
-theme        = "console"
+theme        = "glass"
 window_title = "tivi Setup"
 
 [install]
