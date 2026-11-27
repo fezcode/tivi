@@ -1,0 +1,30 @@
+# Tells fezcode/Airlift that this repository's releases changed, so Airlift's release.json
+# is rebuilt and every Airlift user sees the new version. Only the repository name is sent:
+# Airlift reads the release itself from GitHub.
+#
+# Managed by Airlift (scripts/install-notify-workflow.ps1). Needs the AIRLIFT_DISPATCH_TOKEN
+# secret (scripts/set-notify-token.ps1). GitHub runs this from the commit the release tag
+# points at, so tag a commit that already contains this file.
+name: Notify Airlift
+
+on:
+  release:
+    types: [published, unpublished, edited, deleted]
+
+permissions: {}
+
+jobs:
+  notify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Notify fezcode/Airlift
+        env:
+          GH_TOKEN: ${{ secrets.AIRLIFT_DISPATCH_TOKEN }}
+          REPOSITORY: ${{ github.repository }}
+        run: |
+          if [ -z "$GH_TOKEN" ]; then
+            echo "::error::AIRLIFT_DISPATCH_TOKEN is missing. Run scripts/set-notify-token.ps1 in the Airlift repository."
+            exit 1
+          fi
+          gh api repos/fezcode/Airlift/dispatches -f event_type=app-release -f "client_payload[repository]=$REPOSITORY"
